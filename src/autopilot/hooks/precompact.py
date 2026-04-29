@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Claude Code PreCompact hook.
+Claude Code PreCompact hook — invoked as: python3 -m autopilot.hooks.precompact
 Provides a custom compaction prompt that preserves RunState artifacts
 and drops conversation noise.
 """
@@ -8,10 +7,8 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
+load_dotenv(Path.home() / ".autopilot" / ".env")
 
 from autopilot.config import get_project_id
 from autopilot.tracker import init_db, load_active_run

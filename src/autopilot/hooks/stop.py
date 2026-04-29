@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Claude Code Stop hook.
+Claude Code Stop hook — invoked as: python3 -m autopilot.hooks.stop
 Reads session data from hook payload, writes to DuckDB + Langfuse.
 """
 import json
@@ -10,11 +9,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Ensure src is on path when run as script
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
+load_dotenv(Path.home() / ".autopilot" / ".env")
 
 from autopilot.config import get_project_id, get_branch
 from autopilot.tracker import init_db, save_session, load_active_run, save_run

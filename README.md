@@ -17,21 +17,33 @@ ap REPL → clarify → Claude Code session (hooks track cost + gate subagents) 
 
 State lives in an explicit **RunState machine** (DuckDB), not Claude's chat history. Every session gets a structured briefing injected — not a transcript. This makes context cheap, runs resumable, and cost attributable.
 
+## Prerequisites
+
+- [Claude Code](https://claude.ai/code) CLI installed and authenticated
+- Python 3.9+
+- [`gh`](https://cli.github.com) CLI (for `ap ship` and the GH Actions reviewer)
+- A GitHub repo with a remote set as `origin`
+
 ## Install
 
 ```sh
 pip install -e .
+ap init
+```
+
+`ap init` writes the hooks into `~/.claude/settings.json` and creates `~/.autopilot/.env` with a template. Fill in your keys:
+
+```sh
+# ~/.autopilot/.env
+ANTHROPIC_API_KEY=sk-ant-...
+LANGFUSE_PUBLIC_KEY=pk-lf-...   # optional — free at cloud.langfuse.com
+LANGFUSE_SECRET_KEY=sk-lf-...   # optional
+```
+
+If `ap` isn't found after install, add Python's user bin to your PATH:
+```sh
 echo 'export PATH="$HOME/Library/Python/3.9/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
-
-Copy and fill in env vars:
-```sh
-cp .env.example .env
-```
-
-Required:
-- `ANTHROPIC_API_KEY` — your Anthropic key
-- `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` — free at [cloud.langfuse.com](https://cloud.langfuse.com) (optional but recommended for observability)
 
 ## Usage
 

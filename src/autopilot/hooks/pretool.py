@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Claude Code PreToolUse hook.
+Claude Code PreToolUse hook — invoked as: python3 -m autopilot.hooks.pretool
 Enforces hard constraints: step limit, bash whitelist, Agent spawn gate, budget gate.
 Exit 0 = allow. Exit 2 = block (Claude sees the reason).
 """
@@ -10,10 +9,8 @@ import sys
 import uuid
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
+load_dotenv(Path.home() / ".autopilot" / ".env")
 
 from autopilot.config import get_project_id, constraints
 from autopilot.tracker import init_db, load_active_run, save_run, save_subagent_event, get_cost_today

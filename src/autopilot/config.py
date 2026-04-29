@@ -3,7 +3,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 import yaml
 
-load_dotenv()
+# Load from ~/.autopilot/.env (portable) then local .env (dev override)
+load_dotenv(Path.home() / ".autopilot" / ".env")
+load_dotenv(override=False)
 
 DB_PATH = Path(os.getenv("AP_DB_PATH", "~/.autopilot/costs.duckdb")).expanduser()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)

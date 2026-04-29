@@ -19,6 +19,13 @@ def main(ctx: typer.Context) -> None:
 
 
 @app.command()
+def init(force: bool = typer.Option(False, "--force", help="Overwrite existing hooks")) -> None:
+    """Wire Autopilot hooks into ~/.claude/settings.json and create ~/.autopilot/.env."""
+    from autopilot.commands.init import cmd_init
+    cmd_init(force=force)
+
+
+@app.command()
 def status() -> None:
     """Show current run state and today's cost."""
     from autopilot.commands.stats import cmd_status
