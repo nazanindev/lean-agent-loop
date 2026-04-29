@@ -285,7 +285,6 @@ class AutopilotREPL:
         briefing = get_session_briefing(self.run)
         directive = phase_directive(self.run)
 
-        # Build the full initial message: structured context + what to do + the task
         initial_message = (
             f"{briefing}\n"
             f"**Instructions for this session:**\n{directive}\n\n"
@@ -296,6 +295,13 @@ class AutopilotREPL:
         env = os.environ.copy()
         if self.no_agents:
             env["AP_NO_SPAWN"] = "1"
+
+        # Avoid the auth conflict between a logged-in claude.ai session and
+        # ANTHROPIC_API_KEY. Autopilot's own SDK calls still use the key from
+        # the parent process; we only strip it from the subprocess.
+        # Set AP_FORCE_API_KEY=1 if you actually want the CLI to bill via API.
+        if os.getenv("AP_FORCE_API_KEY") != "1":
+            env.pop("ANTHROPIC_API_KEY", None)
 
         console.print(
             f"\n[dim]→ Launching Claude ({model}) | "
