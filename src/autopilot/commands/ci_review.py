@@ -8,6 +8,7 @@ from typing import Optional
 import anthropic
 from rich.console import Console
 
+from autopilot.billing import metered_call
 from autopilot.config import load_style, style_prompt
 
 console = Console()
@@ -56,7 +57,6 @@ def _get_diff(pr_number: Optional[int], diff_path: Optional[str]) -> str:
         if result.returncode == 0:
             return result.stdout
         raise RuntimeError(f"gh pr diff failed: {result.stderr}")
-    # Fall back to local diff
     result = subprocess.run(["git", "diff", "HEAD~1"], capture_output=True, text=True)
     return result.stdout
 
@@ -85,13 +85,15 @@ def cmd_ci_review(diff_path: Optional[str] = None, pr_number: Optional[int] = No
         return
 
     client = _client()
+    run_id = f"ci-pr{pr_number}" if pr_number else "ci-local"
 
     # ── Pass 1: Haiku quick scan ──────────────────────────────────────────────
     system1 = (ci_style + "\n\n" + PASS1_SYSTEM) if ci_style else PASS1_SYSTEM
     console.print("[dim]Pass 1: quick scan (Haiku)...[/dim]")
 
-    resp1 = client.messages.create(
-        model=HAIKU,
+    resp1 = metered_call(
+        client, HAIKU,
+        run_id=run_id, purpose="ci_review_pass1",
         max_tokens=1000,
         system=system1,
         messages=[{"role": "user", "content": f"Diff:\n\n{diff[:12000]}"}],
@@ -112,7 +114,7 @@ def cmd_ci_review(diff_path: Optional[str] = None, pr_number: Optional[int] = No
         f"{len(suggestions)} suggestion(s), {len(nits)} nit(s)[/dim]"
     )
 
-    # ── Pass 2: Sonnet deep review (only if there are blockers or suggestions) ─
+    # ── Pass 2: Sonnet deep review (only if there are issues) ────────────────
     if not issues:
         final_comment = "Looks good."
     else:
@@ -120,8 +122,9 @@ def cmd_ci_review(diff_path: Optional[str] = None, pr_number: Optional[int] = No
         console.print("[dim]Pass 2: deep review (Sonnet)...[/dim]")
 
         issues_summary = json.dumps(issues, indent=2)
-        resp2 = client.messages.create(
-            model=SONNET,
+        resp2 = metered_call(
+            client, SONNET,
+            run_id=run_id, purpose="ci_review_pass2",
             max_tokens=800,
             system=system2,
             messages=[{"role": "user", "content": (
@@ -139,6 +142,5 @@ def cmd_ci_review(diff_path: Optional[str] = None, pr_number: Optional[int] = No
     else:
         console.print("[dim](No PR number provided — review printed above)[/dim]")
 
-    # Exit non-zero if blockers found (useful for CI enforcement)
     if blockers:
         raise SystemExit(1)

@@ -70,7 +70,12 @@ def complete_plan_step(run: RunState, step_id: str) -> RunState:
 def complete_run(run: RunState) -> RunState:
     run.status = RunStatus.complete
     save_run(run)
-    trace_run_event(run.run_id, run.project, "run_complete", {"cost_usd": run.cost_usd})
+    trace_run_event(run.run_id, run.project, "run_complete", {
+        "api_spend_usd": run.cost_usd,
+        "subscription_msgs": run.subscription_msgs,
+        "subscription_tokens_in": run.subscription_tokens_in,
+        "subscription_tokens_out": run.subscription_tokens_out,
+    })
     return run
 
 
@@ -94,7 +99,11 @@ def save_pr_url(run: RunState, pr_url: str) -> RunState:
     """Record the PR URL on the run after shipping."""
     run.pr_url = pr_url
     save_run(run)
-    trace_run_event(run.run_id, run.project, "pr_created", {"pr_url": pr_url, "cost_usd": run.cost_usd})
+    trace_run_event(run.run_id, run.project, "pr_created", {
+        "pr_url": pr_url,
+        "api_spend_usd": run.cost_usd,
+        "subscription_msgs": run.subscription_msgs,
+    })
     return run
 
 

@@ -13,6 +13,14 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _ROOT = Path(__file__).parent.parent.parent
 _STYLE_PATH = Path.home() / ".autopilot" / "style.yaml"
 
+# Fallback caps used when constraints.yaml is unavailable
+_DEFAULT_PLAN_WINDOW_CAPS: dict = {
+    "pro":      {"msgs": 45,   "tokens_per_window": 2_000_000},
+    "max5":     {"msgs": 225,  "tokens_per_window": 10_000_000},
+    "max20":    {"msgs": 900,  "tokens_per_window": 40_000_000},
+    "api_only": {"msgs": 0,    "tokens_per_window": 0},
+}
+
 
 def _load_yaml(name: str) -> dict:
     p = _ROOT / name
@@ -108,6 +116,21 @@ def style_prompt(style: dict, sections: list) -> "str | None":
         parts.append(f"[Style: {section}]\n{serialized}")
 
     return "\n\n".join(parts) if parts else None
+
+
+def get_plan() -> str:
+    """Return the user's subscription plan from AP_PLAN env (default: pro)."""
+    return os.getenv("AP_PLAN", "pro").lower()
+
+
+def get_plan_window_caps() -> dict:
+    """Return per-plan message + token caps for 5-hour quota windows."""
+    return constraints().get("plan_window_caps", _DEFAULT_PLAN_WINDOW_CAPS)
+
+
+# Convenience alias populated at import time; use get_plan_window_caps() for
+# live reads when constraints.yaml may have changed.
+PLAN_WINDOW_CAPS = _DEFAULT_PLAN_WINDOW_CAPS
 
 
 def get_branch() -> str:

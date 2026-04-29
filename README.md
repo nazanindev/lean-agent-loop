@@ -4,15 +4,29 @@ A cost-aware CLI workflow for AI-assisted development: prompt → patch → PR �
 
 ---
 
+## Two billing surfaces
+
+Autopilot tracks two distinct cost surfaces separately — mixing them up produces meaningless numbers:
+
+| Surface | Auth | Billing | What ap tracks |
+|---|---|---|---|
+| **Claude Code sessions** | `claude login` (claude.ai Pro/Max) | Flat subscription — $0 per session | 5-hour quota window msgs + tokens |
+| **ap utility calls** | `ANTHROPIC_API_KEY` | Per-token API billing | Real USD per call (clarify, ship, ci-review) |
+
+**Why the split matters:** Claude Code interactive sessions (the big coding loop) run against your Pro/Max subscription. They cost you $0 marginal, but they burn through your 5-hour message window. The `ap` CLI itself makes a handful of direct SDK calls per PR — those are metered and cost real money (typically cents, Haiku-heavy).
+
+**Trust boundary:** If you flip to API mode (`AP_FORCE_API_KEY=1`), set a workspace spend cap in the [Anthropic console](https://console.anthropic.com) — autopilot's gates don't protect against runaway in-session spend. The guards here only gate the ap utility calls.
+
+---
+
 ## The problem
 
-AI coding tools are powerful but expensive and hard to control:
-
-- No visibility into spend without manually checking the UI
-- Claude spawns subagents freely — each starts cold and multiplies cost
+- No visibility into subscription quota burn without checking the claude.ai UI
+- No visibility into real API spend for the utility calls (`ap ship`, `ap ci-review`)
+- Claude spawns subagents freely — each starts cold and multiplies quota consumption
 - Switching between Opus (planning) and Sonnet (execution) is manual cognitive overhead
 - Creating PRs and triggering code reviews is friction after every task
-- Long conversations bloat context and inflate cost with no structured way to compress
+- Long conversations bloat context and inflate quota with no structured way to compress
 
 Autopilot treats the model as an **untrusted subprocess**: every constraint is enforced by hooks, not hoped for.
 
@@ -21,7 +35,7 @@ Autopilot treats the model as an **untrusted subprocess**: every constraint is e
 ## How it works
 
 ```
-ap REPL → clarify → Claude Code session (hooks track cost + gate subagents) → ap ship → GH Actions review
+ap REPL → clarify → Claude Code session (hooks track quota + gate subagents) → ap ship → GH Actions review
 ```
 
 State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected — not a transcript. This keeps context cheap, runs resumable, and cost attributable.
@@ -40,20 +54,21 @@ Three hooks run globally across **every Claude Code session** via `~/.claude/set
 
 | Hook | File | Purpose |
 |---|---|---|
-| `Stop` | `hooks/stop.py` | Captures token usage + cost → DuckDB + Langfuse on session end |
-| `PreToolUse` | `hooks/pretool.py` | Step counter, bash allowlist, Agent spawn gate, budget gate |
+| `Stop` | `hooks/stop.py` | Captures token usage → subscription quota window (DuckDB + Langfuse) on session end |
+| `PreToolUse` | `hooks/pretool.py` | Step counter, bash allowlist, Agent spawn gate, API spend gate, quota warnings |
 | `PreCompact` | `hooks/precompact.py` | Injects custom compaction prompt that preserves RunState artifacts |
 
-Because hooks are wired globally, Autopilot's cost tracking and constraints apply to Claude Code sessions in **any repo** on your machine — not just this one.
+Because hooks are wired globally, Autopilot's quota tracking and constraints apply to Claude Code sessions in **any repo** on your machine — not just this one.
 
 ---
 
 ## Prerequisites
 
-- [Claude Code](https://claude.ai/code) CLI installed and authenticated
+- [Claude Code](https://claude.ai/code) CLI installed and authenticated (`claude login`)
 - Python 3.9+
 - [`gh`](https://cli.github.com) CLI (for `ap ship` and the GH Actions reviewer)
 - A GitHub repo with a remote set as `origin`
+- An Anthropic API key (for ap utility calls only — `ap ship`, `ap ci-review`, clarify questions)
 
 ---
 
@@ -68,9 +83,11 @@ ap init
 
 ```sh
 # ~/.autopilot/.env
-ANTHROPIC_API_KEY=sk-ant-...
-LANGFUSE_PUBLIC_KEY=pk-lf-...   # optional — free at cloud.langfuse.com
-LANGFUSE_SECRET_KEY=sk-lf-...   # optional
+ANTHROPIC_API_KEY=sk-ant-...         # for ap utility calls (ship, ci-review, clarify)
+AP_PLAN=pro                          # your claude.ai plan: pro | max5 | max20 | api_only
+
+LANGFUSE_PUBLIC_KEY=pk-lf-...        # optional — free at cloud.langfuse.com
+LANGFUSE_SECRET_KEY=sk-lf-...        # optional
 ```
 
 If `ap` isn't found after install, add Python's user bin to your PATH:
@@ -89,10 +106,10 @@ echo 'export PATH="$HOME/Library/Python/3.9/bin:$PATH"' >> ~/.zshrc && source ~/
 ap
 ```
 
-Type a task in natural language. Autopilot asks clarifying questions, routes to the right model, launches Claude Code, and tracks cost.
+Type a task in natural language. Autopilot asks clarifying questions, routes to the right model, launches Claude Code, and tracks quota + API spend.
 
 ```
-ap [project:lean-agent-loop] > add JWT authentication to the API
+ap [plan:sonnet|step:0/20|wt:0.0|api:$0.00|quota:3/45] > add JWT authentication to the API
 
 Before starting, a few questions:
 1. JWT or session-based?
@@ -112,7 +129,7 @@ Your answers: JWT only, no social
 | `/fast` | Switch to Haiku (quick tasks) |
 | `/model opus\|sonnet\|haiku` | Force a specific model |
 | `/no-agents` | Toggle subagent spawn blocking |
-| `/budget $X` | Set session budget gate |
+| `/budget $X` | Set API spend gate (applies to utility calls) |
 | `/new` | Compress context, start fresh session with RunState injected |
 | `/compact` | Same as `/new` |
 | `/resume [run_id]` | Resume an interrupted run (picker if no ID given) |
@@ -120,21 +137,21 @@ Your answers: JWT only, no social
 | `/verify` | Run tests/lint for current project |
 | `/ship` | Verify → commit → create PR |
 | `/done` | Mark current run complete |
-| `/status` | Show run state + cost |
+| `/status` | Show quota window + API spend + run state |
 | `/quit` | Exit |
 
 ### CLI commands
 
 ```sh
 ap                     # launch interactive REPL
-ap status              # today's cost + active run (with budget bar + projected cost)
-ap stats               # cost breakdown by project
+ap status              # quota window + API spend today + active run
+ap stats               # usage breakdown by project
 ap stats --project foo # filter by project
 ap route "review PR"   # recommend model tier for a task description
 ap verify              # run tests/lint for the current project
 ap ship                # verify → AI commit message → git commit → AI PR description → gh pr create
 ap resume [run-id]     # resume an interrupted run (shows picker if no ID given)
-ap serve               # local cost dashboard on :7331
+ap serve               # local dashboard on :7331
 ap ci-review --pr 42   # AI code review for a PR (used by GitHub Actions)
 ```
 
@@ -169,8 +186,16 @@ Configured in `constraints.yaml` and enforced via the `PreToolUse` hook — not 
 ```yaml
 max_steps_per_run: 20        # blocks further tool calls once exceeded
 max_tokens_per_step: 8000    # per-step token ceiling
-budget_gate_usd: 2.00        # blocks Agent spawns when cumulative cost exceeds this
-context_warn_pct: 0.80       # warns when context window is 80% full
+
+# Claude Code subscription quota (warns, doesn't hard-block — Anthropic enforces the real cap)
+subscription_quota_warn_pct: 0.80   # warn at 80% of 5-hour window
+plan_window_caps:
+  pro:   { msgs: 45 }    # ~45 msgs per 5h window on Pro
+  max5:  { msgs: 225 }   # Max 5x
+  max20: { msgs: 900 }   # Max 20x
+
+# ap utility API spend (hard gate — blocks Agent spawns)
+api_spend_gate_usd: 1.00    # blocks Agent spawns if ap utility $ today >= this
 
 allowed_bash_commands:       # allowlist — unlisted commands are blocked
   - git, pytest, python, uv, pip, npm, npx, gh, cat, ls, find, grep ...
@@ -190,7 +215,8 @@ Every Claude Code session is traced to [Langfuse](https://cloud.langfuse.com) (f
 
 - Project (derived from `git remote get-url origin`)
 - Phase, run ID, step count
-- Token usage + cost per session
+- Token usage per session (subscription surface: $0, tokens only)
+- API spend per utility call (real $)
 - Subagent spawn events (allowed or blocked)
 
 Cost is also stored locally in `~/.autopilot/costs.duckdb` and queryable at any time via `ap stats` — no external dependency required.
@@ -199,7 +225,19 @@ Cost is also stored locally in `~/.autopilot/costs.duckdb` and queryable at any 
 
 ## Cross-repo use
 
-`ap` installs globally. The cost DB at `~/.autopilot/costs.duckdb` and hooks in `~/.claude/settings.json` work across all your projects automatically. Project is identified by git remote URL so costs are attributed correctly per repo.
+`ap` installs globally. The cost DB at `~/.autopilot/costs.duckdb` and hooks in `~/.claude/settings.json` work across all your projects automatically. Project is identified by git remote URL so quota and spend are attributed correctly per repo.
+
+---
+
+## API mode
+
+If you want Claude Code itself to bill via the API (instead of riding your subscription), set:
+
+```sh
+AP_FORCE_API_KEY=1   # in ~/.autopilot/.env or shell
+```
+
+The Stop hook will route session tokens through the `api` billing path and compute real USD. **Before doing this, set a workspace spend cap in the [Anthropic console](https://console.anthropic.com) — Claude Code sessions can run 2–10M tokens and ap's step gate doesn't cap in-session spend.**
 
 ---
 

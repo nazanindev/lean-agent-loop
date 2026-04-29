@@ -15,10 +15,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from autopilot.config import get_project_id, get_branch, model_for_phase
+from autopilot.billing import metered_call
+from autopilot.config import get_project_id, get_branch, model_for_phase, get_plan, get_plan_window_caps
 from autopilot.router import MODEL_ALIASES, model_for
 from autopilot.tracker import (
-    Phase, RunStatus, init_db, load_active_run, save_run, get_cost_today
+    Phase, RunStatus, init_db, load_active_run, save_run,
+    get_api_spend_today, get_window_usage,
 )
 from autopilot.run_manager import (
     create_run, advance_phase, refresh_context_summary,
@@ -53,8 +55,16 @@ class AutopilotREPL:
             phase = self.run.phase.value
             step = f"{self.run.current_step}/{self.run.max_steps}"
             budget = f"{self.run.step_budget_used:.1f}"
-            cost = f"${self.run.cost_usd:.2f}"
-            parts.append(f"{phase}:{model_short}|step:{step}|wt:{budget}|{cost}")
+            api_spend = f"api:${self.run.cost_usd:.2f}"
+            # Quota % for the current 5-hour window
+            plan = get_plan()
+            window = get_window_usage(plan)
+            cap = get_plan_window_caps().get(plan, {}).get("msgs", 0)
+            quota_str = f"quota:{window['msgs_used']}/{cap}" if cap else ""
+            inner_parts = [f"{phase}:{model_short}", f"step:{step}", f"wt:{budget}", api_spend]
+            if quota_str:
+                inner_parts.append(quota_str)
+            parts.append("|".join(inner_parts))
         else:
             parts.append(f"project:{self.project}")
         flags = []
@@ -201,8 +211,16 @@ class AutopilotREPL:
         self.run = None
 
     def _show_status(self) -> None:
-        today = get_cost_today(self.project)
-        console.print(f"[bold]Project:[/bold] {self.project} | [bold]Today:[/bold] ${today:.4f}")
+        api_today = get_api_spend_today(self.project)
+        plan = get_plan()
+        window = get_window_usage(plan)
+        cap = get_plan_window_caps().get(plan, {}).get("msgs", 0)
+        quota_str = f"{window['msgs_used']}/{cap} msgs" if cap else f"{window['msgs_used']} msgs"
+        console.print(
+            f"[bold]Project:[/bold] {self.project} | "
+            f"[bold]API spend today:[/bold] ${api_today:.4f} | "
+            f"[bold]Quota (5h window):[/bold] {quota_str}"
+        )
         if self.run:
             console.print(
                 f"[bold]Run:[/bold] {self.run.run_id} | "
@@ -242,9 +260,11 @@ class AutopilotREPL:
         """Use Haiku to generate clarifying questions, return enriched goal."""
         import anthropic as _anthropic
         client = _anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+        run_id = self.run.run_id if self.run else "pre-run"
         try:
-            resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            resp = metered_call(
+                client, "claude-haiku-4-5-20251001",
+                run_id=run_id, purpose="clarify",
                 max_tokens=300,
                 messages=[{"role": "user", "content": (
                     f"Given this dev task: '{goal}'\n\n"
@@ -365,10 +385,11 @@ class AutopilotREPL:
             if updated:
                 self.run = updated
 
-            today_cost = get_cost_today(self.project)
+            api_today = get_api_spend_today(self.project)
             console.print(
-                f"\n[dim]Session ended. Run cost: ${self.run.cost_usd:.4f} | "
-                f"Today: ${today_cost:.4f}[/dim]"
+                f"\n[dim]Session ended. "
+                f"API spend: ${self.run.cost_usd:.4f} run / ${api_today:.4f} today | "
+                f"Subscription: {self.run.subscription_msgs} msgs this run[/dim]"
             )
 
             # If a plan was just produced, surface it

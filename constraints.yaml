@@ -1,6 +1,5 @@
 max_steps_per_run: 20
 max_tokens_per_step: 8000
-budget_gate_usd: 2.00
 context_warn_pct: 0.80
 
 # Weighted step budget — each tool call deducts its weight from the budget.
@@ -29,6 +28,26 @@ phase_step_budgets:
 # When plan steps are parsed from ExitPlanMode, max_steps is set to
 # len(plan_steps) * this multiplier (minimum: max_steps_per_run).
 plan_steps_multiplier: 3.0
+
+# ── API spend gate (ap utility calls: clarify, ship, ci-review) ─────────────
+# These hit ANTHROPIC_API_KEY and cost real money. Block Agent spawns if
+# today's total ap API spend exceeds this.
+api_spend_gate_usd: 1.00
+
+# ── Subscription quota gate (Claude Code sessions) ───────────────────────────
+# Claude Code runs against your claude.ai Pro/Max subscription; sessions cost
+# $0 marginal. We warn (never hard-block — Anthropic enforces the real cap)
+# when quota consumption hits this fraction of the 5-hour window limit.
+subscription_quota_warn_pct: 0.80
+
+# ── Subscription plan caps (messages per 5-hour window) ──────────────────────
+# Set AP_PLAN in ~/.autopilot/.env to match your plan.
+# These are approximate; adjust if Anthropic changes them.
+plan_window_caps:
+  pro:      { msgs: 45,   tokens_per_window: 2000000 }
+  max5:     { msgs: 225,  tokens_per_window: 10000000 }
+  max20:    { msgs: 900,  tokens_per_window: 40000000 }
+  api_only: { msgs: 0,    tokens_per_window: 0 }
 
 allowed_bash_commands:
   - git

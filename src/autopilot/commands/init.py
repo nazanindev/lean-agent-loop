@@ -66,7 +66,10 @@ def cmd_init(force: bool = False) -> None:
 
     if not AP_ENV_PATH.exists():
         shutil.copy(AP_ENV_EXAMPLE, AP_ENV_PATH)
-        console.print(f"[yellow]Created {AP_ENV_PATH} — fill in your API keys.[/yellow]")
+        console.print(
+            f"[yellow]Created {AP_ENV_PATH} — fill in your API key and set AP_PLAN "
+            f"(pro|max5|max20|api_only).[/yellow]"
+        )
     else:
         console.print(f"[dim]Env file already exists: {AP_ENV_PATH}[/dim]")
 

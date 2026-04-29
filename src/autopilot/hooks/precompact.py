@@ -41,7 +41,7 @@ def main() -> None:
 - Goal: {run.goal}
 - Phase: {run.phase.value} (step {run.current_step}/{run.max_steps})
 - Status: {run.status.value}
-- Cost so far: ${run.cost_usd:.4f}
+- API spend so far: ${run.cost_usd:.4f} (subscription: {run.subscription_msgs} msgs)
 """
         if run.plan_steps:
             context_addon += "\n### Plan Steps\n"

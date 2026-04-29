@@ -37,6 +37,7 @@ _HTML = """<!DOCTYPE html>
   .phase { font-size: 0.7rem; color: #58a6ff; text-transform: uppercase; }
   #refresh { font-size: 0.7rem; color: #8b949e; float: right; cursor: pointer; background: none; border: none; color: #8b949e; }
   #refresh:hover { color: #58a6ff; }
+  .section-label { font-size: 0.65rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem; }
 </style>
 </head>
 <body>
@@ -50,9 +51,15 @@ async function load() {
     fetch('/runs').then(r=>r.json()),
   ]);
 
-  const budget = status.budget_gate_usd || 2.0;
-  const todayPct = Math.min((status.cost_today / budget) * 100, 100);
-  const barClass = todayPct > 80 ? 'danger' : todayPct > 50 ? 'warn' : '';
+  const apiGate = status.api_spend_gate_usd || 1.0;
+  const apiPct = Math.min((status.api_spend_today / apiGate) * 100, 100);
+  const apiBarClass = apiPct > 80 ? 'danger' : apiPct > 50 ? 'warn' : '';
+
+  const quota = status.quota || {};
+  const msgCap = quota.msg_cap || 0;
+  const msgsUsed = quota.msgs_used || 0;
+  const quotaPct = msgCap > 0 ? Math.min((msgsUsed / msgCap) * 100, 100) : 0;
+  const quotaBarClass = quotaPct > 80 ? 'danger' : quotaPct > 50 ? 'warn' : '';
 
   let activeHtml = '';
   if (status.active_run) {
@@ -64,7 +71,8 @@ async function load() {
       <div class="card" style="grid-column:1/-1">
         <div class="label">${r.run_id} &middot; <span class="phase">${r.phase}</span></div>
         <div class="value" style="font-size:1rem;margin-top:0.25rem">${r.goal.substring(0,100)}</div>
-        <div class="sub">Step ${r.current_step}/${r.max_steps} &middot; $${r.cost_usd.toFixed(4)} spent &middot; ~$${projected} projected</div>
+        <div class="sub">Step ${r.current_step}/${r.max_steps} &middot; API: $${r.cost_usd.toFixed(4)} &middot; ~$${projected} projected</div>
+        <div class="sub">Subscription: ${r.subscription_msgs} msgs &middot; ${((r.subscription_tokens_in||0)+(r.subscription_tokens_out||0)).toLocaleString()} tokens</div>
         <div class="bar-wrap"><div class="bar ${runPct>80?'warn':''}" style="width:${runPct}%"></div></div>
       </div>`;
   }
@@ -73,8 +81,8 @@ async function load() {
     <tr>
       <td>${p.project}</td>
       <td>${p.sessions}</td>
-      <td>$${p.total_cost.toFixed(4)}</td>
-      <td>${(p.total_tokens||0).toLocaleString()}</td>
+      <td>$${(p.api_spend||0).toFixed(4)}</td>
+      <td>${((p.sub_tokens||0)).toLocaleString()}</td>
       <td>${(p.last_active||'').substring(0,10)}</td>
     </tr>`).join('');
 
@@ -86,20 +94,40 @@ async function load() {
       <td><span class="phase">${r.phase}</span></td>
       <td><span class="badge ${badge}">${r.status}</span></td>
       <td>$${r.cost_usd.toFixed(4)}</td>
+      <td>${r.subscription_msgs||0}</td>
       <td>${(r.updated_at||'').substring(0,10)}</td>
     </tr>`;}).join('');
 
+  const quotaCard = msgCap > 0 ? `
+    <div class="card">
+      <div class="section-label">Subscription</div>
+      <div class="label">5h window quota (${quota.plan||'pro'})</div>
+      <div class="value">${msgsUsed}<span style="font-size:1rem;color:#8b949e">/${msgCap}</span></div>
+      <div class="sub">msgs used &middot; ${quotaPct.toFixed(0)}% of window</div>
+      <div class="bar-wrap"><div class="bar ${quotaBarClass}" style="width:${quotaPct}%"></div></div>
+    </div>` : `
+    <div class="card">
+      <div class="section-label">Subscription</div>
+      <div class="label">Quota</div>
+      <div class="value" style="font-size:1rem;margin-top:0.3rem">${quota.plan||'api_only'}</div>
+      <div class="sub">No window cap to track</div>
+    </div>`;
+
   document.getElementById('app').innerHTML = `
     <div class="grid">
+      ${quotaCard}
       <div class="card">
-        <div class="label">Today (this project)</div>
-        <div class="value">$${status.cost_today_project.toFixed(4)}</div>
-        <div class="sub">${todayPct.toFixed(0)}% of $${budget} budget</div>
-        <div class="bar-wrap"><div class="bar ${barClass}" style="width:${todayPct}%"></div></div>
+        <div class="section-label">API utility calls</div>
+        <div class="label">Spend today (this project)</div>
+        <div class="value">$${status.api_spend_today.toFixed(4)}</div>
+        <div class="sub">${apiPct.toFixed(0)}% of $${apiGate} gate</div>
+        <div class="bar-wrap"><div class="bar ${apiBarClass}" style="width:${apiPct}%"></div></div>
       </div>
       <div class="card">
-        <div class="label">Today (all projects)</div>
-        <div class="value">$${status.cost_today.toFixed(4)}</div>
+        <div class="section-label">API utility calls</div>
+        <div class="label">Spend today (all projects)</div>
+        <div class="value">$${status.api_spend_all.toFixed(4)}</div>
+        <div class="sub">clarify + ship + ci-review</div>
       </div>
       <div class="card">
         <div class="label">Active project</div>
@@ -109,13 +137,13 @@ async function load() {
     ${activeHtml}
     <h2>By project</h2>
     <table>
-      <thead><tr><th>Project</th><th>Sessions</th><th>Total</th><th>Tokens</th><th>Last active</th></tr></thead>
+      <thead><tr><th>Project</th><th>Sessions</th><th>API spend</th><th>Sub tokens</th><th>Last active</th></tr></thead>
       <tbody>${projectRows || '<tr><td colspan="5" style="color:#8b949e">No data yet</td></tr>'}</tbody>
     </table>
     <h2>Recent runs</h2>
     <table>
-      <thead><tr><th>ID</th><th>Goal</th><th>Phase</th><th>Status</th><th>Cost</th><th>Updated</th></tr></thead>
-      <tbody>${runRows || '<tr><td colspan="6" style="color:#8b949e">No runs yet</td></tr>'}</tbody>
+      <thead><tr><th>ID</th><th>Goal</th><th>Phase</th><th>Status</th><th>API spend</th><th>Sub msgs</th><th>Updated</th></tr></thead>
+      <tbody>${runRows || '<tr><td colspan="7" style="color:#8b949e">No runs yet</td></tr>'}</tbody>
     </table>`;
 }
 load();
@@ -134,9 +162,10 @@ def cmd_serve(port: int = 7331) -> None:
         raise SystemExit(1)
 
     from autopilot.tracker import (
-        init_db, get_cost_today, get_project_stats, get_recent_runs, load_active_run
+        init_db, get_api_spend_today, get_project_stats, get_recent_runs,
+        load_active_run, get_window_usage,
     )
-    from autopilot.config import get_project_id, constraints
+    from autopilot.config import get_project_id, constraints, get_plan, get_plan_window_caps
 
     init_db()
     app = FastAPI(title="Autopilot", docs_url=None, redoc_url=None)
@@ -150,7 +179,13 @@ def cmd_serve(port: int = 7331) -> None:
         project = get_project_id()
         run = load_active_run(project)
         c = constraints()
-        budget_gate = float(os.getenv("AP_BUDGET_USD") or c.get("budget_gate_usd", 2.0))
+        plan = get_plan()
+        caps = get_plan_window_caps()
+        api_gate = float(os.getenv("AP_BUDGET_USD") or c.get("api_spend_gate_usd", 1.0))
+        window = get_window_usage(plan)
+        msg_cap = caps.get(plan, {}).get("msgs", 0)
+        api_today = get_api_spend_today(project)
+        api_today_all = get_api_spend_today()
 
         active = None
         if run:
@@ -167,14 +202,24 @@ def cmd_serve(port: int = 7331) -> None:
                 "projected_usd": projected,
                 "status": run.status.value,
                 "plan_steps": run.plan_steps,
+                "subscription_msgs": run.subscription_msgs,
+                "subscription_tokens_in": run.subscription_tokens_in,
+                "subscription_tokens_out": run.subscription_tokens_out,
             }
 
         return JSONResponse({
             "project": project,
-            "cost_today": get_cost_today(),
-            "cost_today_project": get_cost_today(project),
-            "budget_gate_usd": budget_gate,
-            "budget_pct": round(get_cost_today(project) / budget_gate * 100, 1),
+            "api_spend_today": api_today,
+            "api_spend_all": api_today_all,
+            "api_spend_gate_usd": api_gate,
+            "quota": {
+                "plan": plan,
+                "msgs_used": window["msgs_used"],
+                "msg_cap": msg_cap,
+                "tokens_in": window["tokens_in"],
+                "tokens_out": window["tokens_out"],
+                "window_start": window["window_start"],
+            },
             "active_run": active,
         })
 

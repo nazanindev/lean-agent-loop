@@ -29,7 +29,7 @@ def build_briefing(run: RunState, style: dict = None) -> str:
 **Goal:** {run.goal}
 **Phase:** {run.phase.value.upper()} (step {run.current_step}/{run.max_steps})
 **Status:** {run.status.value}
-**Cost so far:** ${run.cost_usd:.4f}
+**API spend so far:** ${run.cost_usd:.4f} (subscription: {run.subscription_msgs} msgs)
 {plan_str}
 **Artifacts:**
 {artifacts_str}

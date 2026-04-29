@@ -38,21 +38,35 @@ class RunState:
     max_steps: int = 20
     artifacts: list = field(default_factory=list)
     decisions: list = field(default_factory=list)
-    plan_steps: list = field(default_factory=list)  # [{"id": "1", "description": "...", "status": "pending|done|skipped"}]
+    plan_steps: list = field(default_factory=list)
     status: RunStatus = RunStatus.active
     context_summary: str = ""
+    # Real API spend only (ap utility calls: clarify, ship, ci-review)
     cost_usd: float = 0.0
     model: str = "claude-sonnet-4-6"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    # Weighted step budget: accumulates fractional costs per tool type.
     step_budget_used: float = 0.0
-    # PR URL written by `ap ship` once the PR is created.
     pr_url: str = ""
+    # Subscription quota consumed by Claude Code sessions for this run
+    subscription_msgs: int = 0
+    subscription_tokens_in: int = 0
+    subscription_tokens_out: int = 0
 
 
 def _conn() -> duckdb.DuckDBPyConnection:
     return duckdb.connect(str(DB_PATH))
+
+
+def _window_start_for(dt: datetime) -> str:
+    """Return the start of the 5-hour quota window containing dt (UTC)."""
+    bucket = (dt.hour // 5) * 5
+    w = dt.replace(hour=bucket, minute=0, second=0, microsecond=0)
+    return w.isoformat()
+
+
+def current_window_start() -> str:
+    return _window_start_for(datetime.now(timezone.utc))
 
 
 def init_db() -> None:
@@ -76,19 +90,25 @@ def init_db() -> None:
                 created_at VARCHAR,
                 updated_at VARCHAR,
                 step_budget_used DOUBLE,
-                pr_url VARCHAR
+                pr_url VARCHAR,
+                subscription_msgs INTEGER,
+                subscription_tokens_in INTEGER,
+                subscription_tokens_out INTEGER
             )
         """)
-        # Migrations for columns added after initial schema
         for migration in [
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS plan_steps JSON",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS step_budget_used DOUBLE DEFAULT 0.0",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS pr_url VARCHAR DEFAULT ''",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS subscription_msgs INTEGER DEFAULT 0",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS subscription_tokens_in INTEGER DEFAULT 0",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS subscription_tokens_out INTEGER DEFAULT 0",
         ]:
             try:
                 con.execute(migration)
             except Exception:
                 pass
+
         con.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id VARCHAR PRIMARY KEY,
@@ -102,9 +122,18 @@ def init_db() -> None:
                 cost_usd DOUBLE,
                 context_tokens INTEGER,
                 duration_s DOUBLE,
-                created_at VARCHAR
+                created_at VARCHAR,
+                billing_source VARCHAR
             )
         """)
+        for migration in [
+            "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS billing_source VARCHAR DEFAULT 'subscription'",
+        ]:
+            try:
+                con.execute(migration)
+            except Exception:
+                pass
+
         con.execute("""
             CREATE TABLE IF NOT EXISTS subagent_spawns (
                 id VARCHAR PRIMARY KEY,
@@ -119,6 +148,18 @@ def init_db() -> None:
             )
         """)
 
+        # 5-hour subscription quota windows
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS subscription_windows (
+                window_start VARCHAR PRIMARY KEY,
+                plan VARCHAR,
+                msgs_used INTEGER,
+                tokens_in INTEGER,
+                tokens_out INTEGER,
+                updated_at VARCHAR
+            )
+        """)
+
 
 def save_run(run: RunState) -> None:
     run.updated_at = datetime.now(timezone.utc).isoformat()
@@ -130,8 +171,9 @@ def save_run(run: RunState) -> None:
                 artifacts, decisions, plan_steps,
                 status, context_summary, cost_usd,
                 model, created_at, updated_at,
-                step_budget_used, pr_url
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                step_budget_used, pr_url,
+                subscription_msgs, subscription_tokens_in, subscription_tokens_out
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, [
             run.run_id, run.project, run.branch, run.goal,
             run.phase.value, run.current_step, run.max_steps,
@@ -140,13 +182,18 @@ def save_run(run: RunState) -> None:
             run.status.value, run.context_summary, run.cost_usd,
             run.model, run.created_at, run.updated_at,
             run.step_budget_used, run.pr_url,
+            run.subscription_msgs, run.subscription_tokens_in,
+            run.subscription_tokens_out,
         ])
 
 
 def load_run(run_id: str) -> Optional[RunState]:
-    cols = ["run_id", "project", "branch", "goal", "phase", "current_step", "max_steps",
-            "artifacts", "decisions", "plan_steps", "status", "context_summary", "cost_usd",
-            "model", "created_at", "updated_at", "step_budget_used", "pr_url"]
+    cols = [
+        "run_id", "project", "branch", "goal", "phase", "current_step", "max_steps",
+        "artifacts", "decisions", "plan_steps", "status", "context_summary", "cost_usd",
+        "model", "created_at", "updated_at", "step_budget_used", "pr_url",
+        "subscription_msgs", "subscription_tokens_in", "subscription_tokens_out",
+    ]
     with _conn() as con:
         row = con.execute(
             f"SELECT {', '.join(cols)} FROM runs WHERE run_id = ?", [run_id]
@@ -161,6 +208,9 @@ def load_run(run_id: str) -> Optional[RunState]:
     d["status"] = RunStatus(d["status"])
     d["step_budget_used"] = float(d["step_budget_used"] or 0.0)
     d["pr_url"] = d["pr_url"] or ""
+    d["subscription_msgs"] = int(d["subscription_msgs"] or 0)
+    d["subscription_tokens_in"] = int(d["subscription_tokens_in"] or 0)
+    d["subscription_tokens_out"] = int(d["subscription_tokens_out"] or 0)
     return RunState(**{k: v for k, v in d.items() if k in RunState.__dataclass_fields__})
 
 
@@ -178,15 +228,63 @@ def save_session(
     session_id: str, run_id: str, project: str, branch: str, phase: str,
     model: str, tokens_in: int, tokens_out: int, cost_usd: float,
     context_tokens: int = 0, duration_s: float = 0.0,
+    billing_source: str = "subscription",
 ) -> None:
     with _conn() as con:
         con.execute("""
-            INSERT OR REPLACE INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT OR REPLACE INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, [
             session_id, run_id, project, branch, phase, model,
             tokens_in, tokens_out, cost_usd, context_tokens, duration_s,
             datetime.now(timezone.utc).isoformat(),
+            billing_source,
         ])
+
+
+def record_subscription_window(
+    tokens_in: int, tokens_out: int, plan: str = "pro",
+) -> None:
+    """Upsert quota usage into the current 5-hour window bucket."""
+    ws = current_window_start()
+    now = datetime.now(timezone.utc).isoformat()
+    with _conn() as con:
+        existing = con.execute(
+            "SELECT msgs_used, tokens_in, tokens_out FROM subscription_windows WHERE window_start = ?",
+            [ws],
+        ).fetchone()
+        if existing:
+            con.execute("""
+                UPDATE subscription_windows
+                SET msgs_used = ?, tokens_in = ?, tokens_out = ?, updated_at = ?
+                WHERE window_start = ?
+            """, [
+                existing[0] + 1,
+                existing[1] + tokens_in,
+                existing[2] + tokens_out,
+                now, ws,
+            ])
+        else:
+            con.execute("""
+                INSERT INTO subscription_windows VALUES (?,?,?,?,?,?)
+            """, [ws, plan, 1, tokens_in, tokens_out, now])
+
+
+def get_window_usage(plan: str = "pro") -> dict:
+    """Return quota usage for the current 5-hour window."""
+    ws = current_window_start()
+    with _conn() as con:
+        row = con.execute(
+            "SELECT msgs_used, tokens_in, tokens_out FROM subscription_windows WHERE window_start = ?",
+            [ws],
+        ).fetchone()
+    if not row:
+        return {"msgs_used": 0, "tokens_in": 0, "tokens_out": 0, "window_start": ws}
+    return {
+        "msgs_used": row[0],
+        "tokens_in": row[1],
+        "tokens_out": row[2],
+        "window_start": ws,
+    }
 
 
 def save_subagent_event(
@@ -202,19 +300,47 @@ def save_subagent_event(
         ])
 
 
-def get_cost_today(project: Optional[str] = None) -> float:
+def get_api_spend_today(project: Optional[str] = None) -> float:
+    """Real $ spent today via ANTHROPIC_API_KEY (ap utility calls only)."""
     with _conn() as con:
         if project:
             row = con.execute("""
                 SELECT COALESCE(SUM(cost_usd), 0) FROM sessions
-                WHERE project = ? AND created_at >= current_date::VARCHAR
+                WHERE billing_source = 'api' AND project = ?
+                AND created_at >= current_date::VARCHAR
             """, [project]).fetchone()
         else:
             row = con.execute("""
                 SELECT COALESCE(SUM(cost_usd), 0) FROM sessions
-                WHERE created_at >= current_date::VARCHAR
+                WHERE billing_source = 'api'
+                AND created_at >= current_date::VARCHAR
             """).fetchone()
     return row[0] if row else 0.0
+
+
+def get_cost_today(project: Optional[str] = None) -> float:
+    """Alias for get_api_spend_today (kept for backward compatibility)."""
+    return get_api_spend_today(project)
+
+
+def get_subscription_tokens_today(project: Optional[str] = None) -> dict:
+    """Total subscription tokens sent through Claude Code sessions today."""
+    with _conn() as con:
+        if project:
+            row = con.execute("""
+                SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0)
+                FROM sessions
+                WHERE billing_source = 'subscription' AND project = ?
+                AND created_at >= current_date::VARCHAR
+            """, [project]).fetchone()
+        else:
+            row = con.execute("""
+                SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0)
+                FROM sessions
+                WHERE billing_source = 'subscription'
+                AND created_at >= current_date::VARCHAR
+            """).fetchone()
+    return {"tokens_in": row[0] if row else 0, "tokens_out": row[1] if row else 0}
 
 
 def get_project_stats() -> list:
@@ -222,14 +348,15 @@ def get_project_stats() -> list:
         rows = con.execute("""
             SELECT project,
                    COUNT(*) as sessions,
-                   SUM(cost_usd) as total_cost,
-                   SUM(tokens_in + tokens_out) as total_tokens,
+                   COALESCE(SUM(CASE WHEN billing_source = 'api' THEN cost_usd ELSE 0 END), 0) as api_spend,
+                   COALESCE(SUM(tokens_in + tokens_out), 0) as total_tokens,
+                   COALESCE(SUM(CASE WHEN billing_source = 'subscription' THEN tokens_in + tokens_out ELSE 0 END), 0) as sub_tokens,
                    MAX(created_at) as last_active
             FROM sessions
             GROUP BY project
-            ORDER BY total_cost DESC
+            ORDER BY api_spend DESC
         """).fetchall()
-    cols = ["project", "sessions", "total_cost", "total_tokens", "last_active"]
+    cols = ["project", "sessions", "api_spend", "total_tokens", "sub_tokens", "last_active"]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -238,17 +365,22 @@ def get_cost_per_pr(project: Optional[str] = None) -> list:
     with _conn() as con:
         if project:
             rows = con.execute("""
-                SELECT run_id, goal, pr_url, cost_usd, step_budget_used, updated_at
+                SELECT run_id, goal, pr_url, cost_usd, step_budget_used, updated_at,
+                       subscription_msgs, subscription_tokens_in, subscription_tokens_out
                 FROM runs WHERE pr_url != '' AND pr_url IS NOT NULL AND project = ?
                 ORDER BY updated_at DESC
             """, [project]).fetchall()
         else:
             rows = con.execute("""
-                SELECT run_id, goal, pr_url, cost_usd, step_budget_used, updated_at
+                SELECT run_id, goal, pr_url, cost_usd, step_budget_used, updated_at,
+                       subscription_msgs, subscription_tokens_in, subscription_tokens_out
                 FROM runs WHERE pr_url != '' AND pr_url IS NOT NULL
                 ORDER BY updated_at DESC
             """).fetchall()
-    cols = ["run_id", "goal", "pr_url", "cost_usd", "step_budget_used", "updated_at"]
+    cols = [
+        "run_id", "goal", "pr_url", "cost_usd", "step_budget_used", "updated_at",
+        "subscription_msgs", "subscription_tokens_in", "subscription_tokens_out",
+    ]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -256,14 +388,19 @@ def get_recent_runs(project: Optional[str] = None, limit: int = 10) -> list:
     with _conn() as con:
         if project:
             rows = con.execute("""
-                SELECT run_id, goal, phase, status, cost_usd, updated_at
+                SELECT run_id, goal, phase, status, cost_usd, updated_at,
+                       subscription_msgs, subscription_tokens_in, subscription_tokens_out
                 FROM runs WHERE project = ?
                 ORDER BY updated_at DESC LIMIT ?
             """, [project, limit]).fetchall()
         else:
             rows = con.execute("""
-                SELECT run_id, goal, phase, status, cost_usd, updated_at
+                SELECT run_id, goal, phase, status, cost_usd, updated_at,
+                       subscription_msgs, subscription_tokens_in, subscription_tokens_out
                 FROM runs ORDER BY updated_at DESC LIMIT ?
             """, [limit]).fetchall()
-    cols = ["run_id", "goal", "phase", "status", "cost_usd", "updated_at"]
+    cols = [
+        "run_id", "goal", "phase", "status", "cost_usd", "updated_at",
+        "subscription_msgs", "subscription_tokens_in", "subscription_tokens_out",
+    ]
     return [dict(zip(cols, r)) for r in rows]

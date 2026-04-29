@@ -2,6 +2,13 @@
 Claude Code PreToolUse hook — invoked as: python3 -m autopilot.hooks.pretool
 Enforces hard constraints: step limit, bash whitelist, Agent spawn gate, budget gate.
 Exit 0 = allow. Exit 2 = block (Claude sees the reason).
+
+Billing surfaces:
+  subscription — Claude Code runs against claude.ai Pro/Max login.
+    Agent spawn gated on: AP_NO_SPAWN flag + api_spend_gate_usd (utility $).
+    Quota warnings emitted via stderr when nearing 5-hour window limit.
+  api (AP_FORCE_API_KEY=1) — Claude Code bills via ANTHROPIC_API_KEY.
+    Agent spawn gated on: AP_NO_SPAWN flag + api_spend_gate_usd (real $).
 """
 import json
 import os
@@ -12,8 +19,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path.home() / ".autopilot" / ".env")
 
-from autopilot.config import get_project_id, constraints
-from autopilot.tracker import Phase, init_db, load_active_run, save_run, save_subagent_event, get_cost_today
+from autopilot.config import get_project_id, constraints, get_plan, get_plan_window_caps
+from autopilot.tracker import (
+    Phase, init_db, load_active_run, save_run, save_subagent_event,
+    get_api_spend_today, get_window_usage,
+)
 from autopilot.observe import trace_subagent
 
 
@@ -72,10 +82,9 @@ def main() -> None:
     # ── Agent spawn gate ─────────────────────────────────────────────────────
     if tool_name == "Agent":
         allowed_phases = c.get("agent_spawns_allowed_in", ["plan"])
-        # AP_BUDGET_USD (set by /budget in REPL) overrides the YAML default
-        budget_gate = float(os.getenv("AP_BUDGET_USD") or c.get("budget_gate_usd", 2.0))
+        api_spend_gate = float(os.getenv("AP_BUDGET_USD") or c.get("api_spend_gate_usd", 1.0))
         no_spawn = os.getenv("AP_NO_SPAWN", "0") == "1"
-        today_cost = get_cost_today(project)
+        api_spend_today = get_api_spend_today(project)
 
         if no_spawn:
             reason = "AP_NO_SPAWN=1: subagent spawning disabled for this session"
@@ -84,41 +93,48 @@ def main() -> None:
             block(reason)
 
         if phase not in allowed_phases:
-            reason = f"Subagent spawn blocked: phase '{phase}' not in allowed phases {allowed_phases}. Iterate in the main loop instead."
+            reason = (
+                f"Subagent spawn blocked: phase '{phase}' not in allowed phases {allowed_phases}. "
+                "Iterate in the main loop instead."
+            )
             save_subagent_event(session_id, run_id, project, phase, "", False, reason)
             trace_subagent(session_id, run_id, project, phase, False, reason)
             block(reason)
 
-        if today_cost >= budget_gate:
-            reason = f"Budget gate: today's cost ${today_cost:.2f} >= ${budget_gate:.2f} limit. Subagent spawn blocked."
+        if api_spend_today >= api_spend_gate:
+            reason = (
+                f"API spend gate: today's ap utility spend ${api_spend_today:.2f} >= "
+                f"${api_spend_gate:.2f} limit. Subagent spawn blocked."
+            )
             save_subagent_event(session_id, run_id, project, phase, "", False, reason)
             trace_subagent(session_id, run_id, project, phase, False, reason)
             block(reason)
 
-        # Allowed — log it
+        # Allowed — log it and emit a quota warning if nearing 5-hour window limit
         save_subagent_event(session_id, run_id, project, phase, str(tool_input), True)
         trace_subagent(session_id, run_id, project, phase, True)
+        _maybe_warn_quota(c)
 
     # ── Bash command whitelist ────────────────────────────────────────────────
     if tool_name == "Bash":
         cmd = str(tool_input.get("command", "")).strip()
         allowed_cmds = c.get("allowed_bash_commands", [])
         base_cmd = cmd.split()[0] if cmd else ""
-        # strip path prefix: /usr/bin/git → git
         base_cmd = base_cmd.split("/")[-1]
         if allowed_cmds and base_cmd and base_cmd not in allowed_cmds:
             block(f"Bash command '{base_cmd}' not in allowed_bash_commands whitelist.")
 
     # ── Step counter (weighted) ───────────────────────────────────────────────
     if run and tool_name not in ("", "Agent"):
-        # Determine per-tool weight from constraints; fall back to default.
         tool_weights = c.get("tool_weights", {})
         weight = float(tool_weights.get(tool_name, tool_weights.get("default", 1.0)))
 
-        # Effective budget: phase-specific override > run.max_steps > global fallback.
         phase_budgets = c.get("phase_step_budgets", {})
         phase_budget = phase_budgets.get(run.phase.value)
-        effective_max = float(phase_budget if phase_budget is not None else (run.max_steps or c.get("max_steps_per_run", 20)))
+        effective_max = float(
+            phase_budget if phase_budget is not None
+            else (run.max_steps or c.get("max_steps_per_run", 20))
+        )
 
         if run.step_budget_used >= effective_max:
             block(
@@ -131,6 +147,24 @@ def main() -> None:
         save_run(run)
 
     allow()
+
+
+def _maybe_warn_quota(c: dict) -> None:
+    """Print a stderr warning if the subscription quota window is nearly full."""
+    warn_pct = float(c.get("subscription_quota_warn_pct", 0.80))
+    plan = get_plan()
+    caps = get_plan_window_caps()
+    msg_cap = caps.get(plan, {}).get("msgs", 0)
+    if not msg_cap:
+        return
+    window = get_window_usage(plan)
+    used_pct = window["msgs_used"] / msg_cap
+    if used_pct >= warn_pct:
+        print(
+            f"[ap warn] Subscription quota: {window['msgs_used']}/{msg_cap} msgs used "
+            f"({used_pct*100:.0f}%) in current 5-hour window.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

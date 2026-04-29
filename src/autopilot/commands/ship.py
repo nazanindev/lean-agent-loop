@@ -7,6 +7,7 @@ import anthropic
 from rich.console import Console
 from rich.panel import Panel
 
+from autopilot.billing import metered_call
 from autopilot.config import get_project_id, load_style, style_prompt
 from autopilot.tracker import init_db, load_active_run, Phase, RunStatus
 from autopilot.run_manager import advance_phase, complete_run, save_pr_url
@@ -25,17 +26,17 @@ def _gh(args: list, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(["gh"] + args, capture_output=True, text=True, check=check)
 
 
-def _anthropic_client() -> anthropic.Anthropic:
+def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
 
-def _generate_commit_message(diff: str, style: dict) -> str:
+def _generate_commit_message(diff: str, style: dict, run_id: str) -> str:
     system = style_prompt(style, ["commit_message"]) or "Write a short, imperative commit message."
     system += "\nOutput ONLY the commit message — no explanation, no code fences."
 
-    client = _anthropic_client()
-    resp = client.messages.create(
-        model=HAIKU,
+    resp = metered_call(
+        _client(), HAIKU,
+        run_id=run_id, purpose="commit_msg",
         max_tokens=120,
         system=system,
         messages=[{"role": "user", "content": f"Git diff:\n\n{diff[:8000]}"}],
@@ -68,14 +69,19 @@ Artifacts: {run.artifacts if run else []}
 Diff (first 6000 chars):
 {diff[:6000]}"""
 
-    client = _anthropic_client()
+    client = _client()
+    run_id = run.run_id if run else "none"
 
-    title_resp = client.messages.create(
-        model=HAIKU, max_tokens=80, system=system_title,
+    title_resp = metered_call(
+        client, HAIKU,
+        run_id=run_id, purpose="pr_title",
+        max_tokens=80, system=system_title,
         messages=[{"role": "user", "content": context}],
     )
-    body_resp = client.messages.create(
-        model=HAIKU, max_tokens=600, system=system_body,
+    body_resp = metered_call(
+        client, HAIKU,
+        run_id=run_id, purpose="pr_body",
+        max_tokens=600, system=system_body,
         messages=[{"role": "user", "content": context}],
     )
 
@@ -90,6 +96,7 @@ def cmd_ship() -> None:
     project = get_project_id()
     run = load_active_run(project)
     style = load_style()
+    run_id = run.run_id if run else "none"
 
     # ── 1. Verify gate ────────────────────────────────────────────────────────
     console.print("[bold]Running verification...[/bold]")
@@ -112,7 +119,7 @@ def cmd_ship() -> None:
 
     # ── 3. Generate commit message ────────────────────────────────────────────
     console.print("[dim]Generating commit message...[/dim]")
-    commit_msg = _generate_commit_message(diff, style)
+    commit_msg = _generate_commit_message(diff, style, run_id)
     console.print(f"[bold]Commit:[/bold] {commit_msg}")
 
     # ── 4. Stage and commit ───────────────────────────────────────────────────
@@ -156,7 +163,9 @@ def cmd_ship() -> None:
         console.print(Panel(
             f"[bold green]Run complete[/bold green]\n"
             f"Goal: {run.goal[:80]}\n"
-            f"Total cost: ${run.cost_usd:.4f} | Budget used: {run.step_budget_used:.1f} steps\n"
+            f"API spend: ${run.cost_usd:.4f} | Budget used: {run.step_budget_used:.1f} steps\n"
+            f"Subscription: {run.subscription_msgs} msgs | "
+            f"{(run.subscription_tokens_in + run.subscription_tokens_out):,} tokens\n"
             f"PR: {pr_url}",
             border_style="green",
         ))
