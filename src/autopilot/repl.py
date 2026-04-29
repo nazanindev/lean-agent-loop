@@ -5,7 +5,6 @@ Manages run lifecycle, phase switching, and Claude Code subprocess launch.
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +24,7 @@ from autopilot.run_manager import (
     create_run, advance_phase, refresh_context_summary,
     add_artifact, add_decision, complete_run, get_session_briefing
 )
+from autopilot.context import phase_directive
 
 console = Console()
 HISTORY_PATH = Path.home() / ".autopilot" / "repl_history"
@@ -268,23 +268,34 @@ class AutopilotREPL:
 
         return f"{goal}\n\nClarifications: {answers}"
 
-    def _launch_claude(self, enriched_goal: str) -> None:
-        """Launch claude subprocess with correct model and RunState context injected."""
+    def _print_plan(self) -> None:
+        if not self.run or not self.run.plan_steps:
+            return
+        done = sum(1 for s in self.run.plan_steps if s.get("status") == "done")
+        total = len(self.run.plan_steps)
+        lines = [f"[bold]Plan ({done}/{total} done):[/bold]"]
+        for s in self.run.plan_steps:
+            marker = "[green]✓[/green]" if s.get("status") == "done" else "[dim]○[/dim]"
+            lines.append(f"  {marker} {s['description']}")
+        console.print("\n" + "\n".join(lines))
+
+    def _launch_claude(self, task: str) -> None:
+        """Launch claude with the RunState briefing + phase directive pre-loaded."""
         model = self.model_override or model_for(self.run.phase, self.run.goal)
         briefing = get_session_briefing(self.run)
+        directive = phase_directive(self.run)
 
-        # Write briefing to a temp file and prepend to the session
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", delete=False, prefix="ap_briefing_"
-        ) as f:
-            f.write(briefing)
-            briefing_path = f.name
+        # Build the full initial message: structured context + what to do + the task
+        initial_message = (
+            f"{briefing}\n"
+            f"**Instructions for this session:**\n{directive}\n\n"
+            f"---\n\n"
+            f"{task}"
+        )
 
         env = os.environ.copy()
         if self.no_agents:
             env["AP_NO_SPAWN"] = "1"
-
-        cmd = ["claude", "--model", model]
 
         console.print(
             f"\n[dim]→ Launching Claude ({model}) | "
@@ -292,18 +303,10 @@ class AutopilotREPL:
             f"run: {self.run.run_id}[/dim]\n"
         )
 
-        # Pass briefing as initial user message via stdin or print it
-        # Claude Code doesn't accept stdin injection, so we print the briefing path
-        console.print(f"[dim]Session briefing: {briefing_path}[/dim]")
-        console.print("[dim]Paste this at the start if you want full context:[/dim]")
-        console.print(f"[dim]  cat {briefing_path} | pbcopy[/dim]\n")
-
         try:
-            subprocess.run(cmd, env=env)
+            subprocess.run(["claude", "--model", model, initial_message], env=env)
         except FileNotFoundError:
             console.print("[red]Error: 'claude' CLI not found. Install Claude Code first.[/red]")
-        finally:
-            Path(briefing_path).unlink(missing_ok=True)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -343,11 +346,15 @@ class AutopilotREPL:
                     f"\n[bold]New run {self.run.run_id}[/bold] | "
                     f"phase: {self.run.phase.value} | model: {model}"
                 )
+                launch_task = enriched_goal
+            else:
+                launch_task = user_input
 
-            self._launch_claude(user_input)
+            self._launch_claude(launch_task)
 
-            # Reload run after session ends (hooks may have updated cost)
+            # Reload run after session ends (hooks may have updated it)
             from autopilot.tracker import load_run
+            prev_phase = self.run.phase
             updated = load_run(self.run.run_id)
             if updated:
                 self.run = updated
@@ -357,6 +364,12 @@ class AutopilotREPL:
                 f"\n[dim]Session ended. Run cost: ${self.run.cost_usd:.4f} | "
                 f"Today: ${today_cost:.4f}[/dim]"
             )
+
+            # If a plan was just produced, surface it
+            if self.run.plan_steps and (
+                prev_phase == Phase.plan or self.run.phase == Phase.execute
+            ):
+                self._print_plan()
 
 
 def start_repl() -> None:

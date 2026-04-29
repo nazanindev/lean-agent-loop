@@ -1,5 +1,5 @@
 """Context injection — builds session briefing from RunState (not chat history)."""
-from autopilot.tracker import RunState
+from autopilot.tracker import RunState, Phase
 
 
 def build_briefing(run: RunState, style: dict = None) -> str:
@@ -41,8 +41,58 @@ def build_briefing(run: RunState, style: dict = None) -> str:
 {run.context_summary or "(no prior summary — this is the first session for this run)"}
 {agent_style_str}
 ---
-Continue from the current phase. Do not re-litigate decisions already recorded above.
 """
+
+
+def phase_directive(run: RunState) -> str:
+    """Return a terse, phase-specific action instruction appended to the initial message."""
+    pending = [s["description"] for s in run.plan_steps if s.get("status") != "done"]
+    done_count = sum(1 for s in run.plan_steps if s.get("status") == "done")
+
+    if run.phase == Phase.clarify:
+        return (
+            "You are in the CLARIFY phase. Review the goal and codebase, identify any "
+            "remaining ambiguities, then switch to plan mode when ready."
+        )
+
+    if run.phase == Phase.plan:
+        return (
+            "You are in the PLAN phase. Enter plan mode now.\n\n"
+            "Build a numbered execution plan. Each step must be a concrete, atomic action "
+            "(e.g. 'Add JWT middleware to routes/auth.py', not 'Handle auth'). Include:\n"
+            "- File-level actions (create / edit / delete)\n"
+            "- Test or verification steps\n"
+            "- Any migration or config changes\n\n"
+            "When the plan is complete, call ExitPlanMode with the numbered list. "
+            "Autopilot will parse it, set the step budget, and transition to execute automatically."
+        )
+
+    if run.phase == Phase.execute:
+        steps_str = ""
+        if pending:
+            steps_str = "\n\nRemaining steps:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(pending))
+            if done_count:
+                steps_str = f"\n\n{done_count} step(s) already done.{steps_str}"
+        return (
+            f"You are in the EXECUTE phase. Work through the plan steps in order, "
+            f"one at a time. After completing each step, briefly confirm what was done "
+            f"before moving to the next.{steps_str}"
+        )
+
+    if run.phase == Phase.verify:
+        return (
+            "You are in the VERIFY phase. Run the full test suite and linter. "
+            "If anything fails, fix it before reporting back. "
+            "Do not mark the run complete until all checks pass."
+        )
+
+    if run.phase == Phase.ship:
+        return (
+            "You are in the SHIP phase. Run `ap ship` to verify, commit, and open the PR. "
+            "Do not make further code changes."
+        )
+
+    return "Continue from the current phase. Do not re-litigate decisions already recorded above."
 
 
 def summarize_for_new_session(run: RunState, anthropic_client) -> str:
