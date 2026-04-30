@@ -108,6 +108,12 @@ def init_db() -> None:
             except Exception:
                 pass
 
+        # Phase.clarify removed — migrate any persisted runs still on clarify.
+        try:
+            con.execute("UPDATE runs SET phase = 'plan' WHERE phase = 'clarify'")
+        except Exception:
+            pass
+
         con.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id VARCHAR PRIMARY KEY,
@@ -186,6 +192,17 @@ def save_run(run: RunState) -> None:
         ])
 
 
+def _phase_from_stored(value: object) -> Phase:
+    """Map DB phase strings to Phase; unknown values (e.g. legacy 'clarify') → plan."""
+    s = (value or "").strip() if isinstance(value, str) else ""
+    if not s:
+        return Phase.plan
+    try:
+        return Phase(s)
+    except ValueError:
+        return Phase.plan
+
+
 def load_run(run_id: str) -> Optional[RunState]:
     cols = [
         "run_id", "project", "branch", "goal", "phase", "current_step", "max_steps",
@@ -203,7 +220,7 @@ def load_run(run_id: str) -> Optional[RunState]:
     d["artifacts"] = json.loads(d["artifacts"] or "[]")
     d["decisions"] = json.loads(d["decisions"] or "[]")
     d["plan_steps"] = json.loads(d["plan_steps"] or "[]")
-    d["phase"] = Phase(d["phase"])
+    d["phase"] = _phase_from_stored(d["phase"])
     d["status"] = RunStatus(d["status"])
     d["step_budget_used"] = float(d["step_budget_used"] or 0.0)
     d["pr_url"] = d["pr_url"] or ""
