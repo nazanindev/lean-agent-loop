@@ -15,8 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from autopilot.billing import metered_call
-from autopilot.config import get_project_id, get_branch, model_for_phase, get_plan, get_plan_window_caps
+from autopilot.config import get_project_id, get_branch, get_plan, get_plan_window_caps
 from autopilot.router import MODEL_ALIASES, model_for
 from autopilot.tracker import (
     Phase, RunStatus, init_db, load_active_run, save_run,
@@ -256,37 +255,44 @@ class AutopilotREPL:
 
     # ── Task launch ───────────────────────────────────────────────────────────
 
-    def _ask_clarifying_questions(self, goal: str) -> str:
-        """Use Haiku to generate clarifying questions, return enriched goal."""
-        import anthropic as _anthropic
-        client = _anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
-        run_id = self.run.run_id if self.run else "pre-run"
-        try:
-            resp = metered_call(
-                client, "claude-haiku-4-5-20251001",
-                run_id=run_id, purpose="clarify",
-                max_tokens=300,
-                messages=[{"role": "user", "content": (
-                    f"Given this dev task: '{goal}'\n\n"
-                    "Generate 2-3 concise clarifying questions that would prevent ambiguity "
-                    "or rework. Be specific. Number them. If the task is already unambiguous, "
-                    "respond with just: CLEAR"
-                )}],
-            )
-            questions = resp.content[0].text.strip()
-        except Exception:
-            return goal
+    def _structured_intake(self, goal: str) -> tuple[str, str]:
+        """Collect structured context via inline REPL prompts. Returns (enriched_goal, context_summary).
 
-        if questions == "CLEAR" or not questions:
-            return goal
+        All fields after the goal are optional — pressing Enter skips them.
+        No API call; zero quota consumed.
+        """
+        FIELDS = [
+            ("acceptance", "Acceptance criteria (what does done look like?)"),
+            ("out_of_scope", "Out of scope"),
+            ("constraints", "Known constraints (tech, time, etc.)"),
+            ("approach", "Preferred approach"),
+        ]
 
-        console.print(f"\n[bold yellow]Before starting, a few questions:[/bold yellow]\n{questions}\n")
-        try:
-            answers = self.session.prompt("Your answers: ")
-        except (EOFError, KeyboardInterrupt):
-            return goal
+        console.print("\n[bold cyan]Quick intake — press Enter to skip any field.[/bold cyan]\n")
+        answers: dict[str, str] = {}
+        for key, label in FIELDS:
+            try:
+                val = self.session.prompt(f"  {label}: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if val:
+                answers[key] = val
 
-        return f"{goal}\n\nClarifications: {answers}"
+        if not answers:
+            return goal, ""
+
+        lines = [f"**Goal:** {goal}"]
+        label_map = {
+            "acceptance": "Acceptance criteria",
+            "out_of_scope": "Out of scope",
+            "constraints": "Known constraints",
+            "approach": "Preferred approach",
+        }
+        for key, val in answers.items():
+            lines.append(f"**{label_map[key]}:** {val}")
+
+        summary = "\n".join(lines)
+        return goal, summary
 
     def _print_plan(self) -> None:
         if not self.run or not self.run.plan_steps:
@@ -313,6 +319,7 @@ class AutopilotREPL:
         )
 
         env = os.environ.copy()
+        env["AP_ACTIVE"] = "1"
         if self.no_agents:
             env["AP_NO_SPAWN"] = "1"
 
@@ -365,14 +372,18 @@ class AutopilotREPL:
 
             # New task or continuation
             if not self.run or self.run.status != RunStatus.active:
-                enriched_goal = self._ask_clarifying_questions(user_input)
-                self.run = create_run(enriched_goal)
+                goal, intake_summary = self._structured_intake(user_input)
+                self.run = create_run(goal)
+                if intake_summary:
+                    self.run.context_summary = intake_summary
+                    from autopilot.tracker import save_run as _save_run
+                    _save_run(self.run)
                 model = model_for(self.run.phase, self.run.goal)
                 console.print(
                     f"\n[bold]New run {self.run.run_id}[/bold] | "
                     f"phase: {self.run.phase.value} | model: {model}"
                 )
-                launch_task = enriched_goal
+                launch_task = goal
             else:
                 launch_task = user_input
 

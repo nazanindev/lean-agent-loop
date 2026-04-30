@@ -29,6 +29,9 @@ Format the summary as structured markdown under these exact headers."""
 
 
 def main() -> None:
+    if os.getenv("AP_ACTIVE") != "1":
+        sys.exit(0)
+
     init_db()
     project = get_project_id()
     run = load_active_run(project)

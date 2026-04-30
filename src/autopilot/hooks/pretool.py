@@ -48,6 +48,9 @@ def allow() -> None:
 
 
 def main() -> None:
+    if os.getenv("AP_ACTIVE") != "1":
+        sys.exit(0)
+
     init_db()
 
     payload = {}

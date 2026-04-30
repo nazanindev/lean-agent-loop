@@ -1,4 +1,4 @@
-max_steps_per_run: 20
+max_steps_per_run: 30
 max_tokens_per_step: 8000
 context_warn_pct: 0.80
 
@@ -8,20 +8,19 @@ tool_weights:
   Write: 2.0
   Edit: 1.5
   MultiEdit: 2.5
-  Bash: 1.5
+  Bash: 1.0
   Agent: 5.0
-  Read: 0.5
-  Glob: 0.25
-  Grep: 0.25
+  Read: 0.25
+  Glob: 0.1
+  Grep: 0.1
   WebFetch: 0.5
   WebSearch: 0.5
   default: 1.0
 
 # Per-phase step budgets (weighted). Overrides max_steps_per_run when set.
 phase_step_budgets:
-  clarify: 10.0
   plan: 20.0
-  execute: 50.0
+  execute: 60.0
   verify: 20.0
   ship: 10.0
 

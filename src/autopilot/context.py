@@ -49,12 +49,6 @@ def phase_directive(run: RunState) -> str:
     pending = [s["description"] for s in run.plan_steps if s.get("status") != "done"]
     done_count = sum(1 for s in run.plan_steps if s.get("status") == "done")
 
-    if run.phase == Phase.clarify:
-        return (
-            "You are in the CLARIFY phase. Review the goal and codebase, identify any "
-            "remaining ambiguities, then switch to plan mode when ready."
-        )
-
     if run.phase == Phase.plan:
         return (
             "You are in the PLAN phase. Enter plan mode now.\n\n"
