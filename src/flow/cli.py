@@ -8,7 +8,11 @@ app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
-features_app = typer.Typer(help="Manage repo-local features.yaml state")
+features_app = typer.Typer(
+    help="Manage repo-local features.yaml state",
+    no_args_is_help=False,
+    invoke_without_command=True,
+)
 app.add_typer(features_app, name="features")
 
 
@@ -118,6 +122,15 @@ def route(task: str = typer.Argument(..., help="Describe the task")) -> None:
     model = model_for(Phase.execute, task)
     c.print(f"[bold]Recommended model:[/bold] {model}")
     c.print(f"[dim]For task:[/dim] {task}")
+
+
+@features_app.callback(invoke_without_command=True)
+def features_main(ctx: typer.Context) -> None:
+    """Default to listing feature state when no subcommand is passed."""
+    if ctx.invoked_subcommand is None:
+        from flow.commands.features import cmd_features_list
+
+        cmd_features_list()
 
 
 @features_app.command("list")
