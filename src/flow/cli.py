@@ -66,6 +66,16 @@ def verify() -> None:
 
 
 @app.command()
+def check(
+    json_output: bool = typer.Option(False, "--json", help="Print structured JSON output"),
+) -> None:
+    """Run independent checker against local uncommitted diff."""
+    from flow.commands.check import cmd_check
+
+    cmd_check(json_output=json_output)
+
+
+@app.command()
 def resume(run_id: Optional[str] = typer.Argument(None, help="Run ID to resume (shows picker if omitted)")) -> None:
     """Resume an interrupted run. Shows a picker if no run ID is given."""
     from flow.tracker import init_db, load_run, get_recent_runs, RunStatus

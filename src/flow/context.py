@@ -16,6 +16,7 @@ def build_briefing(run: RunState, style: dict = None) -> str:
         plan_str = "\n**Plan steps:**\n" + "\n".join(lines) + "\n"
 
     feature_str = ""
+    sprint_contract_str = ""
     if run.feature_id:
         try:
             from flow.features import get_feature
@@ -27,6 +28,12 @@ def build_briefing(run: RunState, style: dict = None) -> str:
                     f"- Behavior: {feat.behavior}\n"
                     f"- Verification: `{feat.verification}`\n"
                     f"- State: {feat.state}\n"
+                )
+                sprint_contract_str = (
+                    "\n**Sprint contract (this run):**\n"
+                    f"- Scope: {feat.behavior}\n"
+                    f"- Verification command: `{feat.verification}`\n"
+                    "- Out of scope: anything not required to make the verification command exit 0\n"
                 )
             else:
                 feature_str = f"\n**Active feature:** {run.feature_id}\n"
@@ -50,6 +57,7 @@ def build_briefing(run: RunState, style: dict = None) -> str:
 **API spend so far:** ${run.cost_usd:.4f} (subscription: {run.subscription_msgs} msgs)
 {plan_str}
 {feature_str}
+{sprint_contract_str}
 **Artifacts:**
 {artifacts_str}
 

@@ -71,6 +71,8 @@ class AutopilotREPL:
         self.auto_ship_enabled = bool(c.get("auto_ship_on_verify_pass", False))
         self.ship_branch_name = ""
         self.ship_pr_title = ""
+        self.check_blockers_pending_ack = False
+        self.last_check_summary = ""
         self.session = PromptSession(
             history=FileHistory(str(HISTORY_PATH)),
             style=Style.from_dict({"prompt": "bold cyan"}),
@@ -149,7 +151,7 @@ class AutopilotREPL:
             ship_hint = "/ship" if not self.pr_gate_enabled else "/gate pr off then /ship"
             console.print(
                 f"[bold cyan][lifecycle][/bold cyan] [cyan]verify[/cyan] [yellow]Suggested:[/yellow] "
-                f"[green]/verify[/green], [green]{ship_hint}[/green], [green]/status[/green]"
+                f"[green]/verify[/green], [green]/check[/green], [green]{ship_hint}[/green], [green]/status[/green]"
             )
             return
         if phase == Phase.ship:
@@ -237,6 +239,10 @@ class AutopilotREPL:
             self._show_status()
         elif verb == "/verify":
             self._run_verify()
+        elif verb == "/check":
+            self._run_check()
+        elif verb == "/ack-check":
+            self._ack_check()
         elif verb == "/ship":
             self._ship_with_gate()
         elif verb == "/done":
@@ -340,9 +346,11 @@ class AutopilotREPL:
         console.print(f"[green]✓ Step {target_id} marked done[/green]")
 
         if all(s.get("status") == "done" for s in self.run.plan_steps):
+            prev_phase = self.run.phase
             advance_phase(self.run, Phase.verify)
             self.run.phase = Phase.verify
             console.print("[green]✓ All plan steps complete — phase auto-advanced to verify[/green]")
+            self._on_enter_verify(prev_phase)
 
     def _approve_plan(self) -> None:
         """Approve captured plan, move to execute, and immediately start execution."""
@@ -430,6 +438,12 @@ class AutopilotREPL:
 
     def _ship_with_gate(self) -> None:
         """Gate ship command behind explicit PR approval when enabled."""
+        if self.check_blockers_pending_ack:
+            console.print(
+                "[yellow]flow check found blocker-level issues. "
+                "Run `/ack-check` to explicitly accept risk before shipping.[/yellow]"
+            )
+            return
         if self.pr_gate_enabled:
             console.print(
                 "[yellow]PR approval gate is ON. "
@@ -492,6 +506,72 @@ class AutopilotREPL:
             console.print("[red]✗ Verification failed[/red]")
             console.print(f"[dim]{output[-1500:]}[/dim]")
 
+    def _run_check(self, prompt_ack: bool = False) -> dict[str, Any]:
+        """Run flow check and track blocker-ack gate state."""
+        from flow.commands.check import run_check
+
+        try:
+            report = run_check()
+        except Exception as e:
+            console.print(f"[red]flow check failed:[/red] {e}")
+            return {}
+
+        blockers = int(report.get("blocker_count", 0))
+        warnings = int(report.get("warning_count", 0))
+        notes = int(report.get("note_count", 0))
+        summary = str(report.get("summary", "")).strip()
+        self.last_check_summary = summary
+
+        overall = report.get("overall", "?")
+        console.print(
+            f"[bold]flow check[/bold] overall {overall} "
+            f"[dim]({blockers} blocker, {warnings} warning, {notes} note)[/dim]"
+        )
+        if summary:
+            console.print(summary)
+
+        if blockers > 0:
+            self.check_blockers_pending_ack = True
+            console.print("[red]Blocker findings detected. Shipping now requires `/ack-check`.[/red]")
+            if prompt_ack:
+                self._ack_check_prompt()
+        else:
+            self.check_blockers_pending_ack = False
+        return report
+
+    def _ack_check_prompt(self) -> None:
+        """Interactive acknowledgment prompt when blockers exist."""
+        try:
+            answer = self.session.prompt("Acknowledge blocker findings and allow /ship? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer in {"y", "yes"}:
+            self.check_blockers_pending_ack = False
+            console.print("[yellow]Risk acknowledged. /ship is now allowed.[/yellow]")
+        else:
+            console.print("[dim]Shipping remains blocked until `/ack-check` is run.[/dim]")
+
+    def _ack_check(self) -> None:
+        """Explicitly acknowledge blocker-level checker findings."""
+        if not self.check_blockers_pending_ack:
+            console.print("[dim]No pending blocker findings to acknowledge.[/dim]")
+            return
+        self.check_blockers_pending_ack = False
+        console.print("[yellow]Acknowledged flow check blockers. You can now run /ship.[/yellow]")
+
+    def _on_enter_verify(self, prev_phase: Phase) -> None:
+        """Prompt for optional checker run when entering verify from execute."""
+        if prev_phase != Phase.execute:
+            return
+        try:
+            answer = self.session.prompt(
+                "Run `flow check` (independent reviewer, ~$0.01) before /ship? [y/N]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer in {"y", "yes"}:
+            self._run_check(prompt_ack=True)
+
     def _finish_run(self) -> None:
         if not self.run:
             return
@@ -551,6 +631,8 @@ class AutopilotREPL:
             "  /step-done [id]→ mark a plan step done (default: next pending)\n"
             "  /next          → alias for /step-done\n"
             "  /verify        → run tests/lint for current project\n"
+            "  /check         → run independent checker on local diff\n"
+            "  /ack-check     → acknowledge blocker findings to allow /ship\n"
             "  /ship          → verify → commit → create PR\n"
             "  /done          → mark current run complete\n"
             "  /status        → show current run + cost\n"
@@ -604,9 +686,11 @@ class AutopilotREPL:
             if marked:
                 console.print(f"[green]✓ Auto-marked {marked} step(s) done from STEP_DONE markers[/green]")
                 if all(s.get("status") == "done" for s in self.run.plan_steps):
+                    prev_phase = self.run.phase
                     advance_phase(self.run, Phase.verify)
                     self.run.phase = Phase.verify
                     console.print("[green]✓ All plan steps complete — phase auto-advanced to verify[/green]")
+                    self._on_enter_verify(prev_phase)
 
         api_today = get_api_spend_today(self.project)
         console.print(
