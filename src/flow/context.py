@@ -1,5 +1,5 @@
 """Context injection — builds session briefing from RunState (not chat history)."""
-from autopilot.tracker import RunState, Phase
+from flow.tracker import RunState, Phase
 
 
 def build_briefing(run: RunState, style: dict = None) -> str:
@@ -17,7 +17,7 @@ def build_briefing(run: RunState, style: dict = None) -> str:
 
     agent_style_str = ""
     if style:
-        from autopilot.config import style_prompt
+        from flow.config import style_prompt
         sp = style_prompt(style, ["agent"])
         if sp:
             agent_style_str = f"\n**Agent style:**\n{sp}\n"

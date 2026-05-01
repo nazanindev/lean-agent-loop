@@ -1,6 +1,6 @@
 """Phase → model selection with keyword overrides."""
-from autopilot.config import routing
-from autopilot.tracker import Phase
+from flow.config import routing
+from flow.tracker import Phase
 
 
 def model_for(phase: Phase, goal: str = "") -> str:

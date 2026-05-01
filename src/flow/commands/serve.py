@@ -161,11 +161,11 @@ def cmd_serve(port: int = 7331) -> None:
         console.print("[red]fastapi and uvicorn are required: pip install fastapi uvicorn[/red]")
         raise SystemExit(1)
 
-    from autopilot.tracker import (
+    from flow.tracker import (
         init_db, get_api_spend_today, get_project_stats, get_recent_runs,
         load_active_run, get_window_usage,
     )
-    from autopilot.config import get_project_id, constraints, get_plan, get_plan_window_caps
+    from flow.config import get_project_id, constraints, get_plan, get_plan_window_caps
 
     init_db()
     app = FastAPI(title="AI Flow", docs_url=None, redoc_url=None)

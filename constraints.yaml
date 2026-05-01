@@ -33,6 +33,19 @@ plan_steps_multiplier: 3.0
 # today's total flow API spend exceeds this.
 api_spend_gate_usd: 1.00
 
+# ── Clean-state exit checks (Stop hook) ────────────────────────────────────────
+# On session stop during these phases, run verification + artifact checks.
+clean_state_check_phases:
+  - verify
+  - ship
+
+# Artifact patterns flagged as stale handoff noise when present in git status.
+clean_state_artifact_patterns:
+  - .log
+  - .tmp
+  - .DS_Store
+  - __pycache__
+
 # ── Subscription quota gate (Claude Code sessions) ───────────────────────────
 # Claude Code runs against your claude.ai Pro/Max subscription; sessions cost
 # $0 marginal. We warn (never hard-block — Anthropic enforces the real cap)

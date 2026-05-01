@@ -7,11 +7,11 @@ import anthropic
 from rich.console import Console
 from rich.panel import Panel
 
-from autopilot.billing import metered_call
-from autopilot.config import get_project_id, load_style, style_prompt
-from autopilot.tracker import init_db, load_active_run, Phase, RunStatus
-from autopilot.run_manager import advance_phase, complete_run, save_pr_url
-from autopilot.commands.verify import run_checks
+from flow.billing import metered_call
+from flow.config import get_project_id, load_style, style_prompt
+from flow.tracker import init_db, load_active_run, Phase, RunStatus
+from flow.run_manager import advance_phase, complete_run, save_pr_url
+from flow.commands.verify import run_checks
 
 console = Console()
 

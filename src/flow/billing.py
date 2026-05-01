@@ -66,7 +66,7 @@ def metered_call(client, model: str, *, run_id: str = "none", purpose: str, **kw
     cost = calc_cost(model, tokens_in, tokens_out)
 
     try:
-        from autopilot.tracker import save_session
+        from flow.tracker import save_session
         save_session(
             session_id=str(uuid.uuid4())[:8],
             run_id=run_id,

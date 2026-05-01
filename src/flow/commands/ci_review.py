@@ -8,8 +8,8 @@ from typing import Optional
 import anthropic
 from rich.console import Console
 
-from autopilot.billing import metered_call
-from autopilot.config import load_style, style_prompt
+from flow.billing import metered_call
+from flow.config import load_style, style_prompt
 
 console = Console()
 

@@ -2,10 +2,10 @@
 import anthropic
 import os
 
-from autopilot.tracker import RunState, Phase, RunStatus, save_run, load_run, load_active_run
-from autopilot.context import build_briefing, summarize_for_new_session
-from autopilot.observe import trace_run_event, trace_run_started
-from autopilot.config import get_project_id, get_branch, constraints
+from flow.tracker import RunState, Phase, RunStatus, save_run, load_run, load_active_run
+from flow.context import build_briefing, summarize_for_new_session
+from flow.observe import trace_run_event, trace_run_started
+from flow.config import get_project_id, get_branch, constraints
 
 
 def _anthropic():

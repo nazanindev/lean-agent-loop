@@ -1,5 +1,5 @@
 """
-Claude Code PreToolUse hook — invoked as: python3 -m autopilot.hooks.pretool
+Claude Code PreToolUse hook — invoked as: python3 -m flow.hooks.pretool
 Enforces hard constraints: step limit, bash whitelist, Agent spawn gate, budget gate.
 Exit 0 = allow. Exit 2 = block (Claude sees the reason).
 
@@ -19,12 +19,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path.home() / ".autopilot" / ".env")
 
-from autopilot.config import get_project_id, constraints, get_plan, get_plan_window_caps
-from autopilot.tracker import (
+from flow.config import get_project_id, constraints, get_plan, get_plan_window_caps
+from flow.tracker import (
     Phase, init_db, load_active_run, save_run, save_subagent_event,
     get_api_spend_today, get_window_usage,
 )
-from autopilot.observe import trace_subagent
+from flow.observe import trace_subagent
 
 
 def _parse_plan_steps(plan_text: str) -> list:
@@ -77,7 +77,7 @@ def main() -> None:
         if run and plan_text:
             steps = _parse_plan_steps(plan_text)
             if steps:
-                from autopilot.run_manager import set_plan_steps, advance_phase
+                from flow.run_manager import set_plan_steps, advance_phase
                 set_plan_steps(run, steps)
                 advance_phase(run, Phase.execute)
         allow()

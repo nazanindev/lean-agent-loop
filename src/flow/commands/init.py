@@ -49,13 +49,13 @@ ci_review:
 
 HOOKS = {
     "Stop": [
-        {"hooks": [{"type": "command", "command": "python3 -m autopilot.hooks.stop"}]}
+        {"hooks": [{"type": "command", "command": "python3 -m flow.hooks.stop"}]}
     ],
     "PreToolUse": [
-        {"matcher": "", "hooks": [{"type": "command", "command": "python3 -m autopilot.hooks.pretool"}]}
+        {"matcher": "", "hooks": [{"type": "command", "command": "python3 -m flow.hooks.pretool"}]}
     ],
     "PreCompact": [
-        {"hooks": [{"type": "command", "command": "python3 -m autopilot.hooks.precompact"}]}
+        {"hooks": [{"type": "command", "command": "python3 -m flow.hooks.precompact"}]}
     ],
 }
 
@@ -104,9 +104,9 @@ def cmd_init(force: bool = False) -> None:
         json.dump(settings, f, indent=2)
 
     console.print("[green]✓ Hooks wired into ~/.claude/settings.json[/green]")
-    console.print("[dim]  Stop       → python3 -m autopilot.hooks.stop[/dim]")
-    console.print("[dim]  PreToolUse → python3 -m autopilot.hooks.pretool[/dim]")
-    console.print("[dim]  PreCompact → python3 -m autopilot.hooks.precompact[/dim]")
+    console.print("[dim]  Stop       → python3 -m flow.hooks.stop[/dim]")
+    console.print("[dim]  PreToolUse → python3 -m flow.hooks.pretool[/dim]")
+    console.print("[dim]  PreCompact → python3 -m flow.hooks.precompact[/dim]")
     console.print(f"\n[dim]Next: add your API keys to {AP_ENV_PATH}[/dim]")
 
 

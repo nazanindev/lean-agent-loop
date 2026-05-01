@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "autopilot"
+name = "flow"
 version = "0.1.0"
 description = "Personal AI dev harness — cost-optimized Claude Code orchestrator"
 requires-python = ">=3.9"
@@ -24,10 +24,10 @@ dependencies = [
 ]
 
 [project.scripts]
-flow = "autopilot.cli:app"
+flow = "flow.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/autopilot"]
+packages = ["src/flow"]
 
 [tool.hatch.build.targets.editable]
-packages = ["src/autopilot"]
+packages = ["src/flow"]

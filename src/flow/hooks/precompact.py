@@ -1,5 +1,5 @@
 """
-Claude Code PreCompact hook — invoked as: python3 -m autopilot.hooks.precompact
+Claude Code PreCompact hook — invoked as: python3 -m flow.hooks.precompact
 Provides a custom compaction prompt that preserves RunState artifacts
 and drops conversation noise.
 """
@@ -11,8 +11,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path.home() / ".autopilot" / ".env")
 
-from autopilot.config import get_project_id
-from autopilot.tracker import init_db, load_active_run
+from flow.config import get_project_id
+from flow.tracker import init_db, load_active_run
 
 COMPACTION_PROMPT = """You are compacting a Claude Code session. Preserve ALL of the following — discard everything else:
 

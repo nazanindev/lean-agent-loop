@@ -19,9 +19,9 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from autopilot.config import constraints, get_project_id, get_branch, get_plan, get_plan_window_caps
-from autopilot.router import MODEL_ALIASES, model_for
-from autopilot.tracker import (
+from flow.config import constraints, get_project_id, get_branch, get_plan, get_plan_window_caps
+from flow.router import MODEL_ALIASES, model_for
+from flow.tracker import (
     Phase, RunStatus, init_db, load_active_run, save_run,
     get_api_spend_today, get_window_usage,
 )
@@ -44,11 +44,11 @@ def _parse_claude_json_stdout(raw_out: str) -> Optional[Dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
     return None
-from autopilot.run_manager import (
+from flow.run_manager import (
     create_run, advance_phase, refresh_context_summary,
     add_artifact, add_decision, complete_run, get_session_briefing
 )
-from autopilot.context import phase_directive
+from flow.context import phase_directive
 
 console = Console()
 HISTORY_PATH = Path.home() / ".autopilot" / "repl_history"
@@ -141,7 +141,7 @@ class AutopilotREPL:
         elif verb == "/verify":
             self._run_verify()
         elif verb == "/ship":
-            from autopilot.commands.ship import cmd_ship
+            from flow.commands.ship import cmd_ship
             cmd_ship()
         elif verb == "/done":
             self._finish_run()
@@ -176,7 +176,7 @@ class AutopilotREPL:
         self._new_session()
 
     def _resume(self, run_id: str) -> None:
-        from autopilot.tracker import load_run, get_recent_runs, RunStatus
+        from flow.tracker import load_run, get_recent_runs, RunStatus
         if run_id:
             r = load_run(run_id)
             if not r:
@@ -217,7 +217,7 @@ class AutopilotREPL:
         console.print(f"[green]✓ Resumed run {run_id}: {r.goal}[/green]")
 
     def _run_verify(self) -> None:
-        from autopilot.commands.verify import run_checks
+        from flow.commands.verify import run_checks
         passed, output = run_checks()
         if passed:
             console.print("[green]✓ Verification passed[/green]")
@@ -570,7 +570,7 @@ class AutopilotREPL:
                 self.run = create_run(goal)
                 if intake_summary:
                     self.run.context_summary = intake_summary
-                    from autopilot.tracker import save_run as _save_run
+                    from flow.tracker import save_run as _save_run
                     _save_run(self.run)
                 model = model_for(self.run.phase, self.run.goal)
                 console.print(
@@ -584,7 +584,7 @@ class AutopilotREPL:
             self._launch_claude(launch_task)
 
             # Reload run after session ends (hooks may have updated it)
-            from autopilot.tracker import load_run
+            from flow.tracker import load_run
             prev_phase = self.run.phase
             updated = load_run(self.run.run_id)
             if updated:

@@ -9,7 +9,7 @@ from typing import Optional
 
 import duckdb
 
-from autopilot.config import DB_PATH
+from flow.config import DB_PATH
 
 
 class Phase(str, Enum):

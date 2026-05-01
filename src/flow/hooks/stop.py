@@ -1,5 +1,5 @@
 """
-Claude Code Stop hook — invoked as: python3 -m autopilot.hooks.stop
+Claude Code Stop hook — invoked as: python3 -m flow.hooks.stop
 Reads session data from hook payload, writes to DuckDB + Langfuse.
 
 Two billing surfaces:
@@ -10,6 +10,7 @@ Two billing surfaces:
 """
 import json
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -18,13 +19,63 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path.home() / ".autopilot" / ".env")
 
-from autopilot.billing import calc_cost
-from autopilot.config import get_project_id, get_branch, get_plan
-from autopilot.tracker import (
+from flow.billing import calc_cost
+from flow.config import get_project_id, get_branch, get_plan, constraints
+from flow.tracker import (
     init_db, save_session, load_active_run, save_run,
+    RunStatus,
     record_subscription_window,
 )
-from autopilot.observe import trace_session
+from flow.observe import trace_session
+
+
+def _run_clean_state_checks() -> tuple[bool, list[str]]:
+    """Run lightweight clean-state checks for end-of-session handoff."""
+    failures: list[str] = []
+
+    try:
+        from flow.commands.verify import detect_runner
+
+        runner = detect_runner(Path.cwd())
+        if runner:
+            result = subprocess.run(
+                runner,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                failures.append(f"verification command failed: {runner}")
+    except Exception as e:
+        failures.append(f"verification check error: {e}")
+
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if status.returncode == 0 and status.stdout.strip():
+            patterns = constraints().get(
+                "clean_state_artifact_patterns",
+                [".log", ".tmp", ".DS_Store", "__pycache__"],
+            )
+            dirty_lines = [l for l in status.stdout.splitlines() if l.strip()]
+            artifact_hits = []
+            for line in dirty_lines:
+                path = line[3:].strip() if len(line) > 3 else line.strip()
+                if any(path.endswith(p) or p in path for p in patterns):
+                    artifact_hits.append(path)
+            if artifact_hits:
+                failures.append(
+                    "stale artifacts detected: " + ", ".join(artifact_hits[:8])
+                )
+    except Exception as e:
+        failures.append(f"git clean-state check error: {e}")
+
+    return (len(failures) == 0, failures)
 
 
 def main() -> None:
@@ -57,6 +108,18 @@ def main() -> None:
     run = load_active_run(project)
     run_id = run.run_id if run else "none"
     phase = run.phase.value if run else "unknown"
+
+    clean_state_phases = set(constraints().get("clean_state_check_phases", ["verify", "ship"]))
+    if run and run.phase.value in clean_state_phases:
+        clean_ok, reasons = _run_clean_state_checks()
+        if not clean_ok:
+            run.status = RunStatus.blocked
+            save_run(run)
+            print(
+                f"[flow stop] clean-state checks failed for run {run.run_id}: "
+                + " | ".join(reasons),
+                file=sys.stderr,
+            )
 
     if billing_source == "subscription":
         # $0 marginal cost — track quota consumption only.

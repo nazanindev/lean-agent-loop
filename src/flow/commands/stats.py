@@ -5,12 +5,12 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
-from autopilot.tracker import (
+from flow.tracker import (
     init_db, get_api_spend_today, get_subscription_tokens_today,
     get_project_stats, get_recent_runs, get_cost_per_pr, load_active_run,
     get_window_usage,
 )
-from autopilot.config import get_project_id, constraints, get_plan, get_plan_window_caps
+from flow.config import get_project_id, constraints, get_plan, get_plan_window_caps
 
 console = Console()
 

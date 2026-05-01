@@ -1,5 +1,6 @@
 """Verification gate — auto-detect and run tests/lint before shipping."""
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Tuple, Optional
@@ -72,12 +73,43 @@ def run_checks(cwd: Path = None) -> Tuple[bool, str]:
         return False, f"Verification error: {e}"
 
 
+def _failure_summary(runner: str, output: str) -> tuple[str, str, str]:
+    """Create agent-oriented WHAT/WHY/FIX guidance from runner output."""
+    what = f"{runner} exited non-zero"
+    why = "verification command reported one or more failing checks"
+    fix = f"Run `{runner}` locally and address the first failure before re-running."
+
+    if "Verification timed out" in output:
+        what = f"{runner} timed out after 300s"
+        why = "test suite or command exceeded timeout window"
+        fix = f"Run `{runner}` directly, isolate slow tests, then retry `flow verify`."
+        return what, why, fix
+
+    if runner == "pytest":
+        m = re.search(r"^FAILED\s+([^\n]+)", output, re.MULTILINE)
+        if m:
+            what = m.group(1).strip()
+            why = "pytest reported a failing test case"
+            fix = (
+                f"Run `pytest {what.split('::')[0]} -x` (or target test) to fix the first failure."
+            )
+            return what, why, fix
+
+    err = re.search(r"(?im)^(.*(?:error|failed|exception).*)$", output)
+    if err:
+        what = err.group(1).strip()[:220]
+        why = "command output contains an explicit failure signal"
+        fix = f"Inspect this failure line in `{runner}` output, fix root cause, then re-run."
+
+    return what, why, fix
+
+
 def cmd_verify() -> None:
     """Run verification checks and print the result."""
-    from autopilot.tracker import init_db, load_active_run
-    from autopilot.config import get_project_id
-    from autopilot.run_manager import advance_phase
-    from autopilot.tracker import Phase
+    from flow.tracker import init_db, load_active_run
+    from flow.config import get_project_id
+    from flow.run_manager import advance_phase
+    from flow.tracker import Phase
 
     init_db()
     project = get_project_id()
@@ -86,6 +118,7 @@ def cmd_verify() -> None:
     if run:
         advance_phase(run, Phase.verify)
 
+    runner = detect_runner()
     passed, output = run_checks()
 
     if passed:
@@ -94,6 +127,11 @@ def cmd_verify() -> None:
             advance_phase(run, Phase.ship)
     else:
         console.print("[red]✗ Verification failed[/red]")
+        if runner:
+            what, why, fix = _failure_summary(runner, output)
+            console.print(f"[yellow]WHAT:[/yellow] {what}")
+            console.print(f"[yellow]WHY:[/yellow]  {why}")
+            console.print(f"[yellow]FIX:[/yellow]  {fix}")
         console.print(f"[dim]{output[-2000:]}[/dim]")
 
     if not passed:
