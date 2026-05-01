@@ -1,7 +1,7 @@
-"""flow ship — verify → AI commit message → git commit → AI PR body → gh pr create."""
+"""flow ship — verify → commit → PR create/update."""
 import os
+import re
 import subprocess
-from pathlib import Path
 
 import anthropic
 from rich.console import Console
@@ -91,7 +91,7 @@ Diff (first 6000 chars):
     )
 
 
-def cmd_ship() -> None:
+def cmd_ship(branch_name: str = "", pr_title_override: str = "") -> None:
     init_db()
     project = get_project_id()
     run = load_active_run(project)
@@ -133,22 +133,38 @@ def cmd_ship() -> None:
     # ── 5. Generate PR title + body ───────────────────────────────────────────
     console.print("[dim]Generating PR description...[/dim]")
     pr_title, pr_body = _generate_pr_body(run, diff, style)
+    if pr_title_override.strip():
+        pr_title = pr_title_override.strip()
     console.print(f"[bold]PR title:[/bold] {pr_title}")
 
     # ── 6. Push and create PR ─────────────────────────────────────────────────
     branch_result = _git(["rev-parse", "--abbrev-ref", "HEAD"], check=False)
-    branch = branch_result.stdout.strip() or "HEAD"
+    branch = (branch_name or "").strip() or branch_result.stdout.strip() or "HEAD"
 
-    push_result = subprocess.run(
-        ["git", "push", "-u", "origin", branch],
-        capture_output=True, text=True,
-    )
+    # Optional branch rename for this ship if caller requested a custom name.
+    if branch_name.strip():
+        rename_result = _git(["branch", "-M", branch], check=False)
+        if rename_result.returncode != 0:
+            console.print(f"[red]git branch rename failed:[/red] {rename_result.stderr}")
+            raise SystemExit(1)
+
+    push_result = subprocess.run(["git", "push", "-u", "origin", branch], capture_output=True, text=True)
     if push_result.returncode != 0:
         console.print(f"[red]git push failed:[/red] {push_result.stderr}")
         raise SystemExit(1)
 
     pr_result = _gh(["pr", "create", "--title", pr_title, "--body", pr_body], check=False)
     if pr_result.returncode != 0:
+        combined = (pr_result.stderr or "") + "\n" + (pr_result.stdout or "")
+        existing = re.search(r"https?://github\.com/\S+/pull/\d+", combined)
+        if existing:
+            pr_url = existing.group(0)
+            console.print(f"[yellow]PR already exists:[/yellow] {pr_url}")
+            if run:
+                save_pr_url(run, pr_url)
+                advance_phase(run, Phase.ship)
+                complete_run(run)
+            return
         console.print(f"[red]gh pr create failed:[/red] {pr_result.stderr}")
         raise SystemExit(1)
 

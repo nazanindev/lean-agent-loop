@@ -45,6 +45,10 @@ plan_approval_gate: true
 # Require explicit PR approval gate toggle before /ship.
 pr_approval_gate: true
 
+# When true, successful `/verify` in verify phase immediately runs `/ship`
+# if the PR approval gate is off.
+auto_ship_on_verify_pass: false
+
 # Artifact patterns flagged as stale handoff noise when present in git status.
 clean_state_artifact_patterns:
   - .log

@@ -68,6 +68,9 @@ class AutopilotREPL:
         c = constraints()
         self.plan_gate_enabled = bool(c.get("plan_approval_gate", True))
         self.pr_gate_enabled = bool(c.get("pr_approval_gate", True))
+        self.auto_ship_enabled = bool(c.get("auto_ship_on_verify_pass", False))
+        self.ship_branch_name = ""
+        self.ship_pr_title = ""
         self.session = PromptSession(
             history=FileHistory(str(HISTORY_PATH)),
             style=Style.from_dict({"prompt": "bold cyan"}),
@@ -186,6 +189,10 @@ class AutopilotREPL:
             self._reject_plan()
         elif verb == "/gate":
             self._set_gate(arg)
+        elif verb == "/ship-branch":
+            self._set_ship_branch(arg)
+        elif verb == "/ship-title":
+            self._set_ship_title(arg)
         elif verb in ("/step-done", "/next"):
             self._step_done(arg)
         elif verb == "/status":
@@ -340,17 +347,39 @@ class AutopilotREPL:
     def _set_gate(self, arg: str) -> None:
         """Toggle plan/pr approval gates for this REPL session."""
         tokens = arg.split()
-        if len(tokens) != 2 or tokens[0] not in {"plan", "pr"} or tokens[1] not in {"on", "off"}:
-            console.print("[yellow]Usage: /gate plan on|off OR /gate pr on|off[/yellow]")
+        if len(tokens) != 2 or tokens[0] not in {"plan", "pr", "autoship"} or tokens[1] not in {"on", "off"}:
+            console.print("[yellow]Usage: /gate plan|pr|autoship on|off[/yellow]")
             return
         gate, state_token = tokens
         enabled = state_token == "on"
         if gate == "plan":
             self.plan_gate_enabled = enabled
-        else:
+        elif gate == "pr":
             self.pr_gate_enabled = enabled
+        else:
+            self.auto_ship_enabled = enabled
         state = "ON" if enabled else "OFF"
         console.print(f"[dim]→ {gate.upper()} approval gate: {state}[/dim]")
+
+    def _set_ship_branch(self, arg: str) -> None:
+        """Set/clear branch name override used by /ship."""
+        value = arg.strip()
+        if not value or value.lower() in {"off", "clear", "reset"}:
+            self.ship_branch_name = ""
+            console.print("[dim]→ Ship branch override cleared[/dim]")
+            return
+        self.ship_branch_name = value
+        console.print(f"[dim]→ Ship branch override: {value}[/dim]")
+
+    def _set_ship_title(self, arg: str) -> None:
+        """Set/clear PR title override used by /ship."""
+        value = arg.strip()
+        if not value or value.lower() in {"off", "clear", "reset"}:
+            self.ship_pr_title = ""
+            console.print("[dim]→ Ship PR title override cleared[/dim]")
+            return
+        self.ship_pr_title = value
+        console.print(f"[dim]→ Ship PR title override set[/dim]")
 
     def _maybe_prompt_plan_approval(self) -> None:
         """Show explicit approval prompt when plan gate is enabled."""
@@ -368,7 +397,7 @@ class AutopilotREPL:
             )
             return
         from flow.commands.ship import cmd_ship
-        cmd_ship()
+        cmd_ship(branch_name=self.ship_branch_name, pr_title_override=self.ship_pr_title)
 
     def _resume(self, run_id: str) -> None:
         from flow.tracker import load_run, get_recent_runs, RunStatus
@@ -416,6 +445,9 @@ class AutopilotREPL:
         passed, output = run_checks()
         if passed:
             console.print("[green]✓ Verification passed[/green]")
+            if self.run and self.run.phase == Phase.verify and self.auto_ship_enabled and not self.pr_gate_enabled:
+                console.print("[dim]→ Auto-ship enabled; shipping after verify pass...[/dim]")
+                self._ship_with_gate()
         else:
             console.print("[red]✗ Verification failed[/red]")
             console.print(f"[dim]{output[-1500:]}[/dim]")
@@ -469,6 +501,9 @@ class AutopilotREPL:
             "  /skip-plan     → skip planning, go straight to execute\n"
             "  /gate plan on|off → toggle plan approval gate for this session\n"
             "  /gate pr on|off   → toggle PR approval gate for this session\n\n"
+            "  /gate autoship on|off → auto-run /ship after successful verify\n"
+            "  /ship-branch <name>   → override branch name for /ship (clear/reset/off)\n"
+            "  /ship-title <title>   → override PR title for /ship (clear/reset/off)\n\n"
             "[bold]Run lifecycle:[/bold]\n"
             "  /resume [id]   → resume an interrupted run (picker if no ID)\n"
             "  /approve       → approve captured plan and auto-start execution\n"

@@ -49,10 +49,13 @@ def stats(project: Optional[str] = typer.Option(None, "--project", "-p", help="F
 
 
 @app.command()
-def ship() -> None:
+def ship(
+    branch_name: str = typer.Option("", "--branch-name", help="Rename current branch before push"),
+    pr_title: str = typer.Option("", "--pr-title", help="Override generated PR title"),
+) -> None:
     """Verify tests, commit with AI message, create PR with AI description."""
     from flow.commands.ship import cmd_ship
-    cmd_ship()
+    cmd_ship(branch_name=branch_name, pr_title_override=pr_title)
 
 
 @app.command()
