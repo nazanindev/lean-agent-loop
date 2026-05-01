@@ -32,7 +32,11 @@ def _parse_plan_steps(plan_text: str) -> list:
     import re
     steps = []
     for line in plan_text.splitlines():
-        m = re.match(r"^\s*(\d+)[.)]\s+(.+)", line)
+        m = re.match(
+            r"^\s*(?:\*\*)?\s*(?:step\s*)?(\d+)(?:\s*\*\*)?\s*(?:[.)]|:|—|-)\s+(.+)$",
+            line,
+            flags=re.IGNORECASE,
+        )
         if m:
             steps.append({"id": m.group(1), "description": m.group(2).strip(), "status": "pending"})
     return steps

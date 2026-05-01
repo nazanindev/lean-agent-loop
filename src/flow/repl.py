@@ -119,7 +119,11 @@ class AutopilotREPL:
         """Parse numbered plan lines from assistant output as a fallback."""
         steps = []
         for line in (text or "").splitlines():
-            m = re.match(r"^\s*(\d+)[.)]\s+(.+)", line)
+            m = re.match(
+                r"^\s*(?:\*\*)?\s*(?:step\s*)?(\d+)(?:\s*\*\*)?\s*(?:[.)]|:|—|-)\s+(.+)$",
+                line,
+                flags=re.IGNORECASE,
+            )
             if m:
                 steps.append({"id": m.group(1), "description": m.group(2).strip(), "status": "pending"})
         return steps
@@ -134,7 +138,7 @@ class AutopilotREPL:
 
         if verb == "/plan":
             self._set_phase(Phase.plan)
-        elif verb == "/exec":
+        elif verb in ("/exec", "/execute"):
             self._set_phase(Phase.execute)
         elif verb == "/fast":
             self._set_phase(Phase.execute)
