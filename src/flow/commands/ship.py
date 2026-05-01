@@ -1,7 +1,7 @@
-"""flow ship — verify → AI commit message → git commit → AI PR body → gh pr create."""
+"""flow ship — verify → commit → PR create/update."""
 import os
+import re
 import subprocess
-from pathlib import Path
 
 import anthropic
 from rich.console import Console
@@ -28,6 +28,31 @@ def _gh(args: list, check: bool = True) -> subprocess.CompletedProcess:
 
 def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+
+
+def _slugify(value: str) -> str:
+    value = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower())
+    return value.strip("-")
+
+
+def _style_ship_defaults(style: dict, run) -> tuple[str, str, str]:
+    """Return (branch_name_default, pr_title_prefix, pr_title_from_goal)."""
+    ship_style = style.get("ship") if isinstance(style, dict) else {}
+    if not isinstance(ship_style, dict):
+        return "", "", ""
+
+    branch_name_default = ""
+    if ship_style.get("branch_from_goal") and run and run.goal:
+        prefix = str(ship_style.get("branch_prefix", "") or "")
+        goal_slug = _slugify(run.goal)[:64]
+        if goal_slug:
+            branch_name_default = f"{prefix}{goal_slug}"
+
+    pr_title_prefix = str(ship_style.get("pr_title_prefix", "") or "")
+    pr_title_from_goal = ""
+    if ship_style.get("pr_title_from_goal") and run and run.goal:
+        pr_title_from_goal = str(run.goal).strip()
+    return branch_name_default, pr_title_prefix, pr_title_from_goal
 
 
 def _generate_commit_message(diff: str, style: dict, run_id: str) -> str:
@@ -91,11 +116,12 @@ Diff (first 6000 chars):
     )
 
 
-def cmd_ship() -> None:
+def cmd_ship(branch_name: str = "", pr_title_override: str = "") -> None:
     init_db()
     project = get_project_id()
     run = load_active_run(project)
     style = load_style()
+    style_branch_name, style_title_prefix, style_title_from_goal = _style_ship_defaults(style, run)
     run_id = run.run_id if run else "none"
 
     # ── 1. Verify gate ────────────────────────────────────────────────────────
@@ -133,22 +159,42 @@ def cmd_ship() -> None:
     # ── 5. Generate PR title + body ───────────────────────────────────────────
     console.print("[dim]Generating PR description...[/dim]")
     pr_title, pr_body = _generate_pr_body(run, diff, style)
+    if style_title_from_goal:
+        pr_title = style_title_from_goal
+    if style_title_prefix and not pr_title.startswith(style_title_prefix):
+        pr_title = f"{style_title_prefix}{pr_title}"
+    if pr_title_override.strip():
+        pr_title = pr_title_override.strip()
     console.print(f"[bold]PR title:[/bold] {pr_title}")
 
     # ── 6. Push and create PR ─────────────────────────────────────────────────
     branch_result = _git(["rev-parse", "--abbrev-ref", "HEAD"], check=False)
-    branch = branch_result.stdout.strip() or "HEAD"
+    branch = (branch_name or "").strip() or style_branch_name or branch_result.stdout.strip() or "HEAD"
 
-    push_result = subprocess.run(
-        ["git", "push", "-u", "origin", branch],
-        capture_output=True, text=True,
-    )
+    # Optional branch rename for this ship if caller requested a custom name.
+    if branch_name.strip() or style_branch_name:
+        rename_result = _git(["branch", "-M", branch], check=False)
+        if rename_result.returncode != 0:
+            console.print(f"[red]git branch rename failed:[/red] {rename_result.stderr}")
+            raise SystemExit(1)
+
+    push_result = subprocess.run(["git", "push", "-u", "origin", branch], capture_output=True, text=True)
     if push_result.returncode != 0:
         console.print(f"[red]git push failed:[/red] {push_result.stderr}")
         raise SystemExit(1)
 
     pr_result = _gh(["pr", "create", "--title", pr_title, "--body", pr_body], check=False)
     if pr_result.returncode != 0:
+        combined = (pr_result.stderr or "") + "\n" + (pr_result.stdout or "")
+        existing = re.search(r"https?://github\.com/\S+/pull/\d+", combined)
+        if existing:
+            pr_url = existing.group(0)
+            console.print(f"[yellow]PR already exists:[/yellow] {pr_url}")
+            if run:
+                save_pr_url(run, pr_url)
+                advance_phase(run, Phase.ship)
+                complete_run(run)
+            return
         console.print(f"[red]gh pr create failed:[/red] {pr_result.stderr}")
         raise SystemExit(1)
 

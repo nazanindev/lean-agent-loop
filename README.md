@@ -280,6 +280,12 @@ agent:
   verbosity: concise
   emoji: false
   confirm_before_destructive: true
+
+ship:
+  branch_from_goal: true
+  branch_prefix: "feat/"
+  pr_title_from_goal: false
+  pr_title_prefix: ""
 ```
 
 Per-repo overrides: create `.ap-style.yaml` in the repo root. It deep-merges on top of the global file.

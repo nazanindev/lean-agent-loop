@@ -28,11 +28,16 @@ from flow.observe import trace_subagent
 
 
 def _parse_plan_steps(plan_text: str) -> list:
-    """Parse numbered list items from Claude's ExitPlanMode plan_text."""
+    """Parse strictly structured numbered plan steps from ExitPlanMode."""
     import re
     steps = []
-    for line in plan_text.splitlines():
-        m = re.match(r"^\s*(\d+)[.)]\s+(.+)", line)
+    raw = plan_text or ""
+    for line in raw.splitlines():
+        m = re.match(
+            r"^\s*(?:\*\*)?\s*(?:step\s*)?(\d+)(?:\s*\*\*)?\s*(?:[.)]|:|—|-)\s+(.+)$",
+            line,
+            flags=re.IGNORECASE,
+        )
         if m:
             steps.append({"id": m.group(1), "description": m.group(2).strip(), "status": "pending"})
     return steps
@@ -79,14 +84,15 @@ def main() -> None:
             if steps:
                 from flow.run_manager import set_plan_steps, advance_phase
                 set_plan_steps(run, steps)
-                plan_gate_enabled = bool(c.get("plan_approval_gate", True))
+                gate_env = os.getenv("AP_PLAN_GATE", "").strip().lower()
+                if gate_env in {"0", "off", "false"}:
+                    plan_gate_enabled = False
+                elif gate_env in {"1", "on", "true"}:
+                    plan_gate_enabled = True
+                else:
+                    plan_gate_enabled = bool(c.get("plan_approval_gate", True))
                 if not plan_gate_enabled:
                     advance_phase(run, Phase.execute)
-                else:
-                    print(
-                        "[flow] Plan captured. Awaiting user approval (/approve) to move to execute.",
-                        file=sys.stderr,
-                    )
         allow()
 
     # ── Agent spawn gate ─────────────────────────────────────────────────────

@@ -76,8 +76,13 @@ def phase_directive(run: RunState) -> str:
             "- File-level actions (create / edit / delete)\n"
             "- Test or verification steps\n"
             "- Any migration or config changes\n\n"
-            "When the plan is complete, call ExitPlanMode with the numbered list. "
-            "AI Flow will parse it, set the step budget, and transition to execute automatically."
+            "FORMAT REQUIREMENT (strict): output one step per line as `1. ...`, `2. ...`, etc. "
+            "or `Step 1: ...`, `Step 2: ...`. Do not use prose summaries like "
+            "`my plan has one step` and do not collapse steps into a paragraph.\n\n"
+            "If the user goal names a specific file/path, the first plan step must target that "
+            "file/path directly (or explicitly ask a clarification question first).\n\n"
+            "When the plan is complete, call ExitPlanMode with that structured numbered list. "
+            "AI Flow will parse it and move to the next phase based on gate settings."
         )
 
     if run.phase == Phase.execute:
@@ -89,7 +94,8 @@ def phase_directive(run: RunState) -> str:
         return (
             f"You are in the EXECUTE phase. Work through the plan steps in order, "
             f"one at a time. After completing each step, briefly confirm what was done "
-            f"before moving to the next.{steps_str}"
+            f"before moving to the next. When you finish a step, include a standalone line "
+            f"`STEP_DONE: <step_id>` (example: `STEP_DONE: 1`).{steps_str}"
         )
 
     if run.phase == Phase.verify:
