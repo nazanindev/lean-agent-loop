@@ -46,6 +46,8 @@ Three hooks run for `flow` sessions via `~/.claude/settings.json`:
 
 Hooks only fire when you launch Claude Code through `flow` — regular `claude` sessions are unaffected.
 
+`flow init` also installs a local git `post-merge` hook (`.git/hooks/post-merge`) that checks the active run's PR via `gh` and auto-closes the run when that PR is merged.
+
 ---
 
 ## Two billing surfaces
@@ -113,6 +115,8 @@ flow
 
 Type a task in natural language. AI Flow runs a short **structured intake** in the REPL (optional fields), then runs **Claude Code headlessly** (`claude -p` with JSON output): each turn is one bounded agentic pass, the reply is printed in the terminal, and the same Claude session is **resumed** on the next message until you `/done`. Hooks (`PreToolUse`, `Stop`, …) only run when `flow` sets `AP_ACTIVE=1` on that subprocess, so a normal interactive `claude` session elsewhere is unaffected. Subscription quota + API utility spend are still tracked.
 
+The REPL now gives phase-aware nudges ("lifecycle" hints), supports explicit plan approval (`/approve` / `/reject`), and auto-marks plan steps complete in execute mode when the model emits `STEP_DONE: <id>`.
+
 ```
 flow [plan:sonnet|step:0/30|wt:0.0|api:$0.00|quota:3/45] > add JWT authentication to the API
 
@@ -136,6 +140,14 @@ Quick intake — press Enter to skip any field.
 | `/compact` | Same as `/new` |
 | `/resume [run_id]` | Resume an interrupted run (picker if no ID given) |
 | `/skip-plan` | Skip planning, go straight to execute |
+| `/approve` | Approve captured plan and immediately start execute turn |
+| `/reject` | Clear captured plan and stay in plan |
+| `/next` / `/step-done [id]` | Mark plan step done (auto-advance to verify when complete) |
+| `/gate plan on\|off` | Toggle plan approval gate for this session |
+| `/gate pr on\|off` | Toggle PR approval gate for this session |
+| `/gate autoship on\|off` | Auto-run `/ship` after `/verify` passes in verify phase |
+| `/ship-branch <name>` | Set or clear branch name override for `/ship` |
+| `/ship-title <title>` | Set or clear PR title override for `/ship` |
 | `/verify` | Run tests/lint for current project |
 | `/ship` | Verify → commit → create PR |
 | `/done` | Mark current run complete |
@@ -153,6 +165,7 @@ flow stats --project foo # filter by project
 flow route "review PR"   # recommend model tier for a task description
 flow verify              # run tests/lint for the current project
 flow ship                # verify → AI commit message → git commit → AI PR description → gh pr create
+flow ship --branch-name feat/my-name --pr-title "My PR title"
 flow resume [run-id]     # resume an interrupted run (shows picker if no ID given)
 flow serve               # local dashboard on :7331
 flow serve --port 8080   # serve on a custom port

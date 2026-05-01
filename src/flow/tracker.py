@@ -254,6 +254,40 @@ def load_active_run(project: str) -> Optional[RunState]:
     return load_run(row[0]) if row else None
 
 
+def get_incomplete_runs(project: str, limit: int = 20) -> list:
+    """List non-complete runs for a project, newest first."""
+    with _conn() as con:
+        rows = con.execute("""
+            SELECT run_id, goal, phase, status, cost_usd, updated_at
+            FROM runs
+            WHERE project = ? AND status != 'complete'
+            ORDER BY updated_at DESC
+            LIMIT ?
+        """, [project, limit]).fetchall()
+    cols = ["run_id", "goal", "phase", "status", "cost_usd", "updated_at"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def cleanup_incomplete_runs(project: str, keep_run_id: str = "", include_keep: bool = False) -> int:
+    """Mark incomplete runs as complete for quick hygiene."""
+    with _conn() as con:
+        if include_keep:
+            row = con.execute("""
+                UPDATE runs
+                SET status = 'complete', updated_at = ?
+                WHERE project = ? AND status != 'complete'
+                RETURNING run_id
+            """, [datetime.now(timezone.utc).isoformat(), project]).fetchall()
+        else:
+            row = con.execute("""
+                UPDATE runs
+                SET status = 'complete', updated_at = ?
+                WHERE project = ? AND status != 'complete' AND run_id != ?
+                RETURNING run_id
+            """, [datetime.now(timezone.utc).isoformat(), project, keep_run_id]).fetchall()
+    return len(row or [])
+
+
 def save_session(
     session_id: str, run_id: str, project: str, branch: str, phase: str,
     model: str, tokens_in: int, tokens_out: int, cost_usd: float,
