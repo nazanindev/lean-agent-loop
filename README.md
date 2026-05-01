@@ -1,32 +1,18 @@
 # AI Flow (`flow`)
 
-A cost-aware CLI workflow for AI-assisted development: prompt → patch → PR → review → merge. Optimized for minimal context, controlled token usage, and human-in-the-loop iteration.
+**🚧 Status: Prototype** — workflow is implemented; iterating on end-to-end stability and integration.
 
----
-
-## Two billing surfaces
-
-AI Flow tracks two distinct cost surfaces separately — mixing them up produces meaningless numbers:
-
-| Surface | Auth | Billing | What flow tracks |
-|---|---|---|---|
-| **Claude Code sessions** | `claude login` (claude.ai Pro/Max) | Flat subscription — $0 per session | 5-hour quota window msgs + tokens |
-| **flow utility calls** | `ANTHROPIC_API_KEY` | Per-token API billing | Real USD per call (ship, ci-review) |
-
-**Why the split matters:** Claude Code interactive sessions (the big coding loop) run against your Pro/Max subscription. They cost you $0 marginal, but they burn through your 5-hour message window. The `flow` CLI itself makes a handful of direct SDK calls per PR — those are metered and cost real money (typically cents, Haiku-heavy).
-
-**Trust boundary:** If you flip to API mode (`AP_FORCE_API_KEY=1`), set a workspace spend cap in the [Anthropic console](https://console.anthropic.com) — AI Flow's gates don't protect against runaway in-session spend. The guards here only gate the flow utility calls.
+A CLI harness for cost-aware AI-assisted development: prompt → patch → PR → review → merge. Optimized for minimal context, controlled token usage, and human-in-the-loop iteration.
 
 ---
 
 ## The problem
 
-- No visibility into subscription quota burn without checking the claude.ai UI
-- No visibility into real API spend for the utility calls (`flow ship`, `flow ci-review`)
-- Claude spawns subagents freely — each starts cold and multiplies quota consumption
-- Switching between Opus (planning) and Sonnet (execution) is manual cognitive overhead
+- Limited visibility into real-time token usage and API spend
+- Uncontrolled subagent spawning increases cost and resets context
+- Manual switching between models adds cognitive overhead
 - Creating PRs and triggering code reviews is friction after every task
-- Long conversations bloat context and inflate quota with no structured way to compress
+- Long-running conversations bloat context with no structured compression
 
 AI Flow treats the model as an **untrusted subprocess**: every constraint is enforced by hooks, not hoped for.
 
@@ -61,6 +47,22 @@ Three hooks run for `flow` sessions via `~/.claude/settings.json`:
 Hooks only fire when you launch Claude Code through `flow` — regular `claude` sessions are unaffected.
 
 ---
+
+## Two billing surfaces
+
+Autopilot tracks two distinct cost surfaces separately — mixing them up produces meaningless numbers:
+
+| Surface | Auth | Billing | What ap tracks |
+|---|---|---|---|
+| **Claude Code sessions** | `claude login` (claude.ai Pro/Max) | Flat subscription — $0 per session | 5-hour quota window msgs + tokens |
+| **ap utility calls** | `ANTHROPIC_API_KEY` | Per-token API billing | Real USD per call (ship, ci-review) |
+
+**Why the split matters:** Claude Code interactive sessions (the big coding loop) run against your Pro/Max subscription. They cost you $0 marginal, but they burn through your 5-hour message window. The `ap` CLI itself makes a handful of direct SDK calls per PR — those are metered and cost real money (typically cents, Haiku-heavy).
+
+**Trust boundary:** If you flip to API mode (`AP_FORCE_API_KEY=1`), set a workspace spend cap in the [Anthropic console](https://console.anthropic.com) — autopilot's gates don't protect against runaway in-session spend. The guards here only gate the ap utility calls.
+
+---
+
 
 ## Prerequisites
 
