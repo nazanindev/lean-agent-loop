@@ -28,6 +28,11 @@ phase_step_budgets:
 # len(plan_steps) * this multiplier (minimum: max_steps_per_run).
 plan_steps_multiplier: 3.0
 
+# Plan progression control:
+# false (default): require explicit /approve before moving plan -> execute
+# true: auto-advance to execute as soon as a valid plan is captured
+plan_auto_advance: false
+
 # ── API spend gate (flow utility calls: clarify, ship, ci-review) ─────────────
 # These hit ANTHROPIC_API_KEY and cost real money. Block Agent spawns if
 # today's total flow API spend exceeds this.

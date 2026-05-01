@@ -79,7 +79,13 @@ def main() -> None:
             if steps:
                 from flow.run_manager import set_plan_steps, advance_phase
                 set_plan_steps(run, steps)
-                advance_phase(run, Phase.execute)
+                if bool(c.get("plan_auto_advance", False)):
+                    advance_phase(run, Phase.execute)
+                else:
+                    print(
+                        "[flow] Plan captured. Awaiting user approval (/approve) to move to execute.",
+                        file=sys.stderr,
+                    )
         allow()
 
     # ── Agent spawn gate ─────────────────────────────────────────────────────

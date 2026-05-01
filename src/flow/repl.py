@@ -64,6 +64,7 @@ class AutopilotREPL:
         self.run = None
         self.model_override = None  # type: Optional[str]
         self.no_agents = False
+        self.plan_auto_advance = bool(constraints().get("plan_auto_advance", False))
         self.session = PromptSession(
             history=FileHistory(str(HISTORY_PATH)),
             style=Style.from_dict({"prompt": "bold cyan"}),
@@ -147,6 +148,12 @@ class AutopilotREPL:
                 advance_phase(self.run, Phase.execute)
                 self.run.phase = Phase.execute
                 console.print("[dim]→ Skipped planning phase → execute[/dim]")
+        elif verb == "/approve":
+            self._approve_plan()
+        elif verb == "/reject":
+            self._reject_plan()
+        elif verb == "/auto-plan":
+            self._set_auto_plan(arg)
         elif verb in ("/step-done", "/next"):
             self._step_done(arg)
         elif verb == "/status":
@@ -187,6 +194,58 @@ class AutopilotREPL:
 
     def _compact(self) -> None:
         self._new_session()
+
+    def _approve_plan(self) -> None:
+        """Approve a captured plan and move to execute."""
+        if not self.run:
+            console.print("[yellow]No active run.[/yellow]")
+            return
+        if self.run.phase != Phase.plan:
+            console.print("[yellow]Current run is not in plan phase.[/yellow]")
+            return
+        if not self.run.plan_steps:
+            console.print("[yellow]No plan steps available to approve yet.[/yellow]")
+            return
+        advance_phase(self.run, Phase.execute)
+        self.run.phase = Phase.execute
+        console.print("[green]✓ Plan approved — phase advanced to execute[/green]")
+
+    def _reject_plan(self) -> None:
+        """Reject current plan and request a revised one."""
+        if not self.run:
+            console.print("[yellow]No active run.[/yellow]")
+            return
+        if self.run.phase != Phase.plan:
+            console.print("[yellow]Current run is not in plan phase.[/yellow]")
+            return
+        if self.run.plan_steps:
+            self.run.plan_steps = []
+            save_run(self.run)
+        console.print("[yellow]Plan rejected. Ask for a revised numbered plan in the next turn.[/yellow]")
+
+    def _set_auto_plan(self, arg: str) -> None:
+        """Toggle per-session auto-advance behavior after plan capture."""
+        val = arg.strip().lower()
+        if val in ("on", "true", "1"):
+            self.plan_auto_advance = True
+        elif val in ("off", "false", "0"):
+            self.plan_auto_advance = False
+        else:
+            state = "ON" if self.plan_auto_advance else "OFF"
+            console.print(f"[dim]Auto plan-advance is {state}. Use /auto-plan on|off[/dim]")
+            return
+        state = "ON" if self.plan_auto_advance else "OFF"
+        console.print(f"[dim]→ Auto plan-advance: {state}[/dim]")
+
+    def _maybe_prompt_plan_approval(self) -> None:
+        """Prompt for plan approval when steps are present and phase is still plan."""
+        if not self.run or self.run.phase != Phase.plan or not self.run.plan_steps:
+            return
+        if self.plan_auto_advance:
+            self._approve_plan()
+            return
+        console.print("\n[yellow]Plan captured. Approve to start execution.[/yellow]")
+        console.print("[dim]Use /approve to proceed, /reject to re-plan, or /auto-plan on to always auto-advance.[/dim]")
 
     def _step_done(self, step_ref: str) -> None:
         """Mark a plan step done and auto-advance to verify if complete."""
@@ -311,9 +370,12 @@ class AutopilotREPL:
             "[bold]Control:[/bold]\n"
             "  /no-agents     → toggle subagent spawn blocking\n"
             "  /budget $X     → set session budget gate\n"
+            "  /auto-plan on|off → toggle auto-advance after plan capture\n"
             "  /skip-plan     → skip planning, go straight to execute\n\n"
             "[bold]Run lifecycle:[/bold]\n"
             "  /resume [id]   → resume an interrupted run (picker if no ID)\n"
+            "  /approve       → approve captured plan and start execute phase\n"
+            "  /reject        → reject captured plan and request a revised one\n"
             "  /step-done [id]→ mark a plan step done (default: next pending)\n"
             "  /next          → alias for /step-done\n"
             "  /verify        → run tests/lint for current project\n"
@@ -650,7 +712,7 @@ class AutopilotREPL:
                 self.run = updated
 
             # Fallback: if model produced a numbered plan but didn't call ExitPlanMode,
-            # capture steps and advance to execute automatically.
+            # capture steps so the harness can request explicit approval.
             if (
                 self.run.phase == Phase.plan
                 and not self.run.plan_steps
@@ -659,11 +721,7 @@ class AutopilotREPL:
                 parsed_steps = self._parse_numbered_plan_steps(response_text)
                 if parsed_steps:
                     set_plan_steps(self.run, parsed_steps)
-                    advance_phase(self.run, Phase.execute)
-                    self.run.phase = Phase.execute
-                    console.print(
-                        "[green]✓ Parsed numbered plan from response — auto-advanced to execute[/green]"
-                    )
+                    console.print("[green]✓ Parsed numbered plan from response[/green]")
 
             api_today = get_api_spend_today(self.project)
             console.print(
@@ -677,6 +735,8 @@ class AutopilotREPL:
                 prev_phase == Phase.plan or self.run.phase == Phase.execute
             ):
                 self._print_plan()
+            if self.run.phase == Phase.plan and self.run.plan_steps:
+                self._maybe_prompt_plan_approval()
 
 
 def start_repl() -> None:
