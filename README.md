@@ -1,5 +1,4 @@
-# Autopilot (`ap`)
-> 🚧 Status: Prototype — workflow is implemented; iterating on end-to-end stability and integration.
+**🚧 Status: Prototype** — workflow is implemented; iterating on end-to-end stability and integration.
 
 A prototype CLI harness for cost-aware AI-assisted development: prompt → patch → PR → review → merge. Optimized for minimal context, controlled token usage, and human-in-the-loop iteration.
 
