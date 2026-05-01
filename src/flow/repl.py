@@ -65,6 +65,9 @@ class AutopilotREPL:
         self.run = None
         self.model_override = None  # type: Optional[str]
         self.no_agents = False
+        c = constraints()
+        self.plan_gate_enabled = bool(c.get("plan_approval_gate", True))
+        self.pr_gate_enabled = bool(c.get("pr_approval_gate", True))
         self.session = PromptSession(
             history=FileHistory(str(HISTORY_PATH)),
             style=Style.from_dict({"prompt": "bold cyan"}),
@@ -167,6 +170,12 @@ class AutopilotREPL:
                 advance_phase(self.run, Phase.execute)
                 self.run.phase = Phase.execute
                 console.print("[dim]→ Skipped planning phase → execute[/dim]")
+        elif verb == "/approve":
+            self._approve_plan()
+        elif verb == "/reject":
+            self._reject_plan()
+        elif verb == "/gate":
+            self._set_gate(arg)
         elif verb in ("/step-done", "/next"):
             self._step_done(arg)
         elif verb == "/status":
@@ -174,8 +183,7 @@ class AutopilotREPL:
         elif verb == "/verify":
             self._run_verify()
         elif verb == "/ship":
-            from flow.commands.ship import cmd_ship
-            cmd_ship()
+            self._ship_with_gate()
         elif verb == "/done":
             self._finish_run()
         elif verb in ("/quit", "/exit", "/q"):
@@ -279,6 +287,76 @@ class AutopilotREPL:
             self.run.phase = Phase.verify
             console.print("[green]✓ All plan steps complete — phase auto-advanced to verify[/green]")
 
+    def _approve_plan(self) -> None:
+        """Approve captured plan, move to execute, and immediately start execution."""
+        if not self.run:
+            console.print("[yellow]No active run.[/yellow]")
+            return
+        if not self.run.plan_steps:
+            console.print(
+                "[yellow]No plan steps available to approve yet. "
+                "Ask for a numbered plan first.[/yellow]"
+            )
+            return
+        if self.run.phase != Phase.plan:
+            console.print(
+                f"[yellow]Run is in {self.run.phase.value}, not plan. "
+                "Use /plan first if you need to re-approve.[/yellow]"
+            )
+            return
+        advance_phase(self.run, Phase.execute)
+        self.run.phase = Phase.execute
+        console.print("[green]✓ Plan approved — starting execution now[/green]")
+        self._run_turn("Plan approved. Execute the first pending plan step now.")
+
+    def _reject_plan(self) -> None:
+        """Clear current plan and keep the run in plan phase for replanning."""
+        if not self.run:
+            console.print("[yellow]No active run.[/yellow]")
+            return
+        if not self.run.plan_steps:
+            console.print("[yellow]No captured plan to reject.[/yellow]")
+            return
+        set_plan_steps(self.run, [])
+        self.run.plan_steps = []
+        if self.run.phase != Phase.plan:
+            advance_phase(self.run, Phase.plan)
+            self.run.phase = Phase.plan
+        console.print("[green]✓ Plan rejected. Ask for a revised plan, then /approve.[/green]")
+
+    def _set_gate(self, arg: str) -> None:
+        """Toggle plan/pr approval gates for this REPL session."""
+        tokens = arg.split()
+        if len(tokens) != 2 or tokens[0] not in {"plan", "pr"} or tokens[1] not in {"on", "off"}:
+            console.print("[yellow]Usage: /gate plan on|off OR /gate pr on|off[/yellow]")
+            return
+        gate, state_token = tokens
+        enabled = state_token == "on"
+        if gate == "plan":
+            self.plan_gate_enabled = enabled
+        else:
+            self.pr_gate_enabled = enabled
+        state = "ON" if enabled else "OFF"
+        console.print(f"[dim]→ {gate.upper()} approval gate: {state}[/dim]")
+
+    def _maybe_prompt_plan_approval(self) -> None:
+        """Show explicit approval prompt when plan gate is enabled."""
+        if not self.run or self.run.phase != Phase.plan or not self.run.plan_steps:
+            return
+        if self.plan_gate_enabled:
+            console.print("[yellow]Plan captured. Run /approve to start execution, or /reject to re-plan.[/yellow]")
+
+    def _ship_with_gate(self) -> None:
+        """Gate ship command behind explicit PR approval when enabled."""
+        if self.pr_gate_enabled:
+            console.print(
+                "[yellow]PR approval gate is ON. "
+                "Run `/gate pr off` to bypass, then `/ship` again.[/yellow]"
+            )
+            return
+        from flow.commands.ship import cmd_ship
+        cmd_ship()
+
     def _resume(self, run_id: str) -> None:
         from flow.tracker import load_run, get_recent_runs, RunStatus
         if run_id:
@@ -375,9 +453,13 @@ class AutopilotREPL:
             "[bold]Control:[/bold]\n"
             "  /no-agents     → toggle subagent spawn blocking\n"
             "  /budget $X     → set session budget gate\n"
-            "  /skip-plan     → skip planning, go straight to execute\n\n"
+            "  /skip-plan     → skip planning, go straight to execute\n"
+            "  /gate plan on|off → toggle plan approval gate for this session\n"
+            "  /gate pr on|off   → toggle PR approval gate for this session\n\n"
             "[bold]Run lifecycle:[/bold]\n"
             "  /resume [id]   → resume an interrupted run (picker if no ID)\n"
+            "  /approve       → approve captured plan and auto-start execution\n"
+            "  /reject        → reject captured plan and stay in plan phase\n"
             "  /step-done [id]→ mark a plan step done (default: next pending)\n"
             "  /next          → alias for /step-done\n"
             "  /verify        → run tests/lint for current project\n"
@@ -388,6 +470,50 @@ class AutopilotREPL:
             title="AI Flow commands",
             border_style="dim",
         ))
+
+    def _run_turn(self, launch_task: str) -> None:
+        """Run one model turn and apply post-turn phase/plan handling."""
+        response_text = self._launch_claude(launch_task)
+
+        # Reload run after session ends (hooks may have updated it)
+        from flow.tracker import load_run
+        prev_phase = self.run.phase
+        updated = load_run(self.run.run_id)
+        if updated:
+            self.run = updated
+
+        # Fallback: if model produced a numbered plan but didn't call ExitPlanMode,
+        # capture steps. Auto-advance only when plan gate is disabled.
+        if (
+            self.run.phase == Phase.plan
+            and not self.run.plan_steps
+            and response_text
+        ):
+            parsed_steps = self._parse_numbered_plan_steps(response_text)
+            if parsed_steps:
+                set_plan_steps(self.run, parsed_steps)
+                if self.plan_gate_enabled:
+                    console.print("[green]✓ Parsed plan from response[/green]")
+                else:
+                    advance_phase(self.run, Phase.execute)
+                    self.run.phase = Phase.execute
+                    console.print(
+                        "[green]✓ Parsed plan from response — auto-advanced to execute[/green]"
+                    )
+
+        api_today = get_api_spend_today(self.project)
+        console.print(
+            f"\n[dim]Session ended. "
+            f"API spend: ${self.run.cost_usd:.4f} run / ${api_today:.4f} today | "
+            f"Subscription: {self.run.subscription_msgs} msgs this run[/dim]"
+        )
+
+        # If a plan was just produced, surface it
+        if self.run.plan_steps and (
+            prev_phase == Phase.plan or self.run.phase == Phase.execute
+        ):
+            self._print_plan()
+            self._maybe_prompt_plan_approval()
 
     # ── Task launch ───────────────────────────────────────────────────────────
 
@@ -717,43 +843,7 @@ class AutopilotREPL:
             else:
                 launch_task = user_input
 
-            response_text = self._launch_claude(launch_task)
-
-            # Reload run after session ends (hooks may have updated it)
-            from flow.tracker import load_run
-            prev_phase = self.run.phase
-            updated = load_run(self.run.run_id)
-            if updated:
-                self.run = updated
-
-            # Fallback: if model produced a numbered plan but didn't call ExitPlanMode,
-            # capture steps and advance to execute automatically.
-            if (
-                self.run.phase == Phase.plan
-                and not self.run.plan_steps
-                and response_text
-            ):
-                parsed_steps = self._parse_numbered_plan_steps(response_text)
-                if parsed_steps:
-                    set_plan_steps(self.run, parsed_steps)
-                    advance_phase(self.run, Phase.execute)
-                    self.run.phase = Phase.execute
-                    console.print(
-                        "[green]✓ Parsed numbered plan from response — auto-advanced to execute[/green]"
-                    )
-
-            api_today = get_api_spend_today(self.project)
-            console.print(
-                f"\n[dim]Session ended. "
-                f"API spend: ${self.run.cost_usd:.4f} run / ${api_today:.4f} today | "
-                f"Subscription: {self.run.subscription_msgs} msgs this run[/dim]"
-            )
-
-            # If a plan was just produced, surface it
-            if self.run.plan_steps and (
-                prev_phase == Phase.plan or self.run.phase == Phase.execute
-            ):
-                self._print_plan()
+            self._run_turn(launch_task)
 
 
 def start_repl() -> None:
