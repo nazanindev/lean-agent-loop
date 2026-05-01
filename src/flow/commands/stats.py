@@ -15,6 +15,19 @@ from flow.config import get_project_id, constraints, get_plan, get_plan_window_c
 console = Console()
 
 
+def _active_feature_line() -> str:
+    """Return a compact line describing the active feature, if any."""
+    try:
+        from flow.features import get_active_feature
+
+        feat = get_active_feature()
+        if not feat:
+            return "[dim]Active feature:[/dim] none"
+        return f"[bold]Active feature:[/bold] {feat.id} ({feat.state}) — {feat.behavior[:80]}"
+    except Exception:
+        return "[dim]Active feature:[/dim] unavailable"
+
+
 def _budget_bar(used: float, total: float, width: int = 20) -> str:
     pct = min(used / total, 1.0) if total > 0 else 0
     filled = int(pct * width)
@@ -80,6 +93,11 @@ def cmd_status() -> None:
             f"[bold]Goal:[/bold] {run.goal[:80]}",
             f"[bold]Phase:[/bold] {run.phase.value} | step {run.current_step}/{run.max_steps}"
             f" | budget {run.step_budget_used:.1f}/{effective_max:.0f}",
+            (
+                f"[bold]Feature:[/bold] {run.feature_id}"
+                if run.feature_id
+                else "[dim]Feature:[/dim] none attached"
+            ),
             f"[bold]API spend:[/bold] ${run.cost_usd:.4f}"
             + (f"  →  ~${projected:.4f} projected" if projected else ""),
             f"[bold]Subscription:[/bold] {run.subscription_msgs} msgs | "
@@ -103,6 +121,8 @@ def cmd_status() -> None:
             "",
             "[bold cyan]API spend (utility calls)[/bold cyan]",
             *spend_lines,
+            "",
+            _active_feature_line(),
             "",
             *run_lines,
         ]),

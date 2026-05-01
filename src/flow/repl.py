@@ -69,6 +69,18 @@ class AutopilotREPL:
 
     # ── Prompt ────────────────────────────────────────────────────────────────
 
+    def _active_feature_token(self) -> str:
+        """Prompt/status token for active feature state."""
+        try:
+            from flow.features import get_active_feature
+
+            feat = get_active_feature()
+            if not feat:
+                return ""
+            return f"feat:{feat.id}"
+        except Exception:
+            return ""
+
     def _prompt_str(self) -> str:
         parts = []
         if self.run:
@@ -84,6 +96,9 @@ class AutopilotREPL:
             cap = get_plan_window_caps().get(plan, {}).get("msgs", 0)
             quota_str = f"quota:{window['msgs_used']}/{cap}" if cap else ""
             inner_parts = [f"{phase}:{model_short}", f"step:{step}", f"wt:{budget}", api_spend]
+            feature_token = self._active_feature_token()
+            if feature_token:
+                inner_parts.append(feature_token)
             if quota_str:
                 inner_parts.append(quota_str)
             parts.append("|".join(inner_parts))
@@ -238,10 +253,12 @@ class AutopilotREPL:
         window = get_window_usage(plan)
         cap = get_plan_window_caps().get(plan, {}).get("msgs", 0)
         quota_str = f"{window['msgs_used']}/{cap} msgs" if cap else f"{window['msgs_used']} msgs"
+        feature_token = self._active_feature_token()
         console.print(
             f"[bold]Project:[/bold] {self.project} | "
             f"[bold]API spend today:[/bold] ${api_today:.4f} | "
             f"[bold]Quota (5h window):[/bold] {quota_str}"
+            + (f" | [bold]Active feature:[/bold] {feature_token.split(':', 1)[1]}" if feature_token else "")
         )
         if self.run:
             console.print(
