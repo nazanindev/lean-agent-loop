@@ -123,6 +123,7 @@ def cmd_init(force: bool = False, repo: bool = False) -> None:
             "Run [bold]flow init --force[/bold] to overwrite."
         )
         _show_status(settings)
+        _install_git_post_merge_hook()
         if repo:
             _scaffold_repo_artifacts()
         return
@@ -137,6 +138,8 @@ def cmd_init(force: bool = False, repo: bool = False) -> None:
     console.print("[dim]  PreToolUse → python3 -m flow.hooks.pretool[/dim]")
     console.print("[dim]  PreCompact → python3 -m flow.hooks.precompact[/dim]")
     console.print(f"\n[dim]Next: add your API keys to {AP_ENV_PATH}[/dim]")
+
+    _install_git_post_merge_hook()
 
     if repo:
         _scaffold_repo_artifacts()
@@ -182,3 +185,31 @@ def _scaffold_repo_artifacts() -> None:
         console.print(f"[green]✓ Created {agents_path}[/green]")
     else:
         console.print(f"[dim]Repo artifact exists: {agents_path}[/dim]")
+
+
+def _install_git_post_merge_hook() -> None:
+    """Install .git/hooks/post-merge hook to auto-close merged PR runs."""
+    git_dir = Path.cwd() / ".git"
+    hooks_dir = git_dir / "hooks"
+    if not hooks_dir.exists():
+        console.print("[dim]Skipping git post-merge hook install (not in a git worktree).[/dim]")
+        return
+
+    hook_path = hooks_dir / "post-merge"
+    hook_body = (
+        "#!/bin/sh\n"
+        "# AI Flow: auto-close active run when linked PR is merged.\n"
+        "PYTHONPATH=src python3 -m flow.hooks.postmerge || python3 -m flow.hooks.postmerge\n"
+    )
+
+    if hook_path.exists():
+        existing = hook_path.read_text()
+        if "flow.hooks.postmerge" in existing:
+            console.print(f"[dim]Git hook already configured: {hook_path}[/dim]")
+            return
+        hook_path.write_text(existing.rstrip() + "\n\n" + hook_body)
+    else:
+        hook_path.write_text(hook_body)
+
+    hook_path.chmod(0o755)
+    console.print(f"[green]✓ Installed git post-merge hook: {hook_path}[/green]")
