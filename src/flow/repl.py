@@ -567,7 +567,16 @@ class AutopilotREPL:
             # New task or continuation
             if not self.run or self.run.status != RunStatus.active:
                 goal, intake_summary = self._structured_intake(user_input)
-                self.run = create_run(goal)
+                feature_id = ""
+                try:
+                    from flow.features import get_active_feature
+
+                    active_feature = get_active_feature()
+                    if active_feature:
+                        feature_id = active_feature.id
+                except Exception:
+                    feature_id = ""
+                self.run = create_run(goal, feature_id=feature_id)
                 if intake_summary:
                     self.run.context_summary = intake_summary
                     from flow.tracker import save_run as _save_run

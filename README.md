@@ -158,6 +158,10 @@ flow serve               # local dashboard on :7331
 flow serve --port 8080   # serve on a custom port
 flow ci-review --pr 42   # AI code review for a PR (used by GitHub Actions)
 flow ci-review --diff path/to/file.diff  # review from a local diff file
+flow features list       # list feature state from features.yaml
+flow features add F01 "POST /x returns 201" --verify "pytest tests/test_x.py -x"
+flow features pick       # set one active feature (WIP=1)
+flow features verify     # run active feature verification and mark passing/blocked
 ```
 
 ---

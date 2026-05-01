@@ -8,6 +8,8 @@ app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
+features_app = typer.Typer(help="Manage repo-local features.yaml state")
+app.add_typer(features_app, name="features")
 
 
 @app.callback(invoke_without_command=True)
@@ -116,3 +118,47 @@ def route(task: str = typer.Argument(..., help="Describe the task")) -> None:
     model = model_for(Phase.execute, task)
     c.print(f"[bold]Recommended model:[/bold] {model}")
     c.print(f"[dim]For task:[/dim] {task}")
+
+
+@features_app.command("list")
+def features_list() -> None:
+    """List all features from features.yaml."""
+    from flow.commands.features import cmd_features_list
+    cmd_features_list()
+
+
+@features_app.command("add")
+def features_add(
+    feature_id: str = typer.Argument(..., help="Feature ID (e.g. F01)"),
+    behavior: str = typer.Argument(..., help="Behavior statement"),
+    verify: str = typer.Option(..., "--verify", help="Verification command"),
+    state: str = typer.Option("not_started", "--state", help="Initial state"),
+) -> None:
+    """Add a feature entry."""
+    from flow.commands.features import cmd_features_add
+    cmd_features_add(feature_id=feature_id, behavior=behavior, verification=verify, state=state)
+
+
+@features_app.command("active")
+def features_active() -> None:
+    """Show the active feature."""
+    from flow.commands.features import cmd_features_active
+    cmd_features_active()
+
+
+@features_app.command("pick")
+def features_pick(
+    feature_id: Optional[str] = typer.Argument(None, help="Feature ID to activate; default picks first not_started"),
+) -> None:
+    """Set active feature (WIP=1)."""
+    from flow.commands.features import cmd_features_pick
+    cmd_features_pick(feature_id=feature_id)
+
+
+@features_app.command("verify")
+def features_verify(
+    feature_id: Optional[str] = typer.Option(None, "--id", help="Feature ID; default uses active feature"),
+) -> None:
+    """Run feature verification and transition active -> passing."""
+    from flow.commands.features import cmd_features_verify
+    cmd_features_verify(feature_id=feature_id)

@@ -12,11 +12,12 @@ def _anthropic():
     return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
 
-def create_run(goal: str) -> RunState:
+def create_run(goal: str, feature_id: str = "") -> RunState:
     run = RunState(
         goal=goal,
         project=get_project_id(),
         branch=get_branch(),
+        feature_id=feature_id,
     )
     save_run(run)
     trace_run_started(run.run_id, run.project, run.branch, goal)

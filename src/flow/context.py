@@ -15,6 +15,24 @@ def build_briefing(run: RunState, style: dict = None) -> str:
             lines.append(f"  - [{marker}] {s['description']}")
         plan_str = "\n**Plan steps:**\n" + "\n".join(lines) + "\n"
 
+    feature_str = ""
+    if run.feature_id:
+        try:
+            from flow.features import get_feature
+
+            feat = get_feature(run.feature_id)
+            if feat:
+                feature_str = (
+                    f"\n**Active feature:** {feat.id}\n"
+                    f"- Behavior: {feat.behavior}\n"
+                    f"- Verification: `{feat.verification}`\n"
+                    f"- State: {feat.state}\n"
+                )
+            else:
+                feature_str = f"\n**Active feature:** {run.feature_id}\n"
+        except Exception:
+            feature_str = f"\n**Active feature:** {run.feature_id}\n"
+
     agent_style_str = ""
     if style:
         from flow.config import style_prompt
@@ -31,6 +49,7 @@ def build_briefing(run: RunState, style: dict = None) -> str:
 **Status:** {run.status.value}
 **API spend so far:** ${run.cost_usd:.4f} (subscription: {run.subscription_msgs} msgs)
 {plan_str}
+{feature_str}
 **Artifacts:**
 {artifacts_str}
 
