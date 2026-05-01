@@ -2,7 +2,7 @@
 import anthropic
 import os
 
-from flow.tracker import RunState, Phase, RunStatus, save_run, load_run, load_active_run
+from flow.tracker import RunState, Phase, RunStatus, init_db, save_run, load_run, load_active_run
 from flow.context import build_briefing, summarize_for_new_session
 from flow.observe import trace_run_event, trace_run_started
 from flow.config import get_project_id, get_branch, constraints
@@ -12,11 +12,13 @@ def _anthropic():
     return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
 
-def create_run(goal: str) -> RunState:
+def create_run(goal: str, feature_id: str = "") -> RunState:
+    init_db()
     run = RunState(
         goal=goal,
         project=get_project_id(),
         branch=get_branch(),
+        feature_id=feature_id,
     )
     save_run(run)
     trace_run_started(run.run_id, run.project, run.branch, goal)
