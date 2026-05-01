@@ -960,7 +960,9 @@ class AutopilotREPL:
             if not printed_live:
                 console.print("[bold green]Claude[/bold green]", end=": ")
                 printed_live = True
-            console.print(text, end="")
+            # Stream model tokens as raw text; don't let Rich parse accidental
+            # markup fragments like `[/yellow]` coming from model output.
+            console.print(text, end="", markup=False, highlight=False)
             streamed_parts.append(text)
 
         try:
