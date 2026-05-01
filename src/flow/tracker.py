@@ -55,6 +55,9 @@ class RunState:
     claude_session_id: str = ""
     # Optional feature primitive ID attached to this run
     feature_id: str = ""
+    # Verify-gate: persisted check state across sessions
+    check_blockers_acked: bool = False
+    last_check_result: str = ""
 
 
 def _conn() -> duckdb.DuckDBPyConnection:
@@ -110,6 +113,8 @@ def init_db() -> None:
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS subscription_tokens_out INTEGER DEFAULT 0",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claude_session_id VARCHAR DEFAULT ''",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS feature_id VARCHAR DEFAULT ''",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS check_blockers_acked BOOLEAN DEFAULT false",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS last_check_result TEXT DEFAULT ''",
         ]:
             try:
                 con.execute(migration)
@@ -186,8 +191,9 @@ def save_run(run: RunState) -> None:
                 model, created_at, updated_at,
                 step_budget_used, pr_url,
                 subscription_msgs, subscription_tokens_in, subscription_tokens_out,
-                claude_session_id, feature_id
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                claude_session_id, feature_id,
+                check_blockers_acked, last_check_result
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, [
             run.run_id, run.project, run.branch, run.goal,
             run.phase.value, run.current_step, run.max_steps,
@@ -200,6 +206,8 @@ def save_run(run: RunState) -> None:
             run.subscription_tokens_out,
             run.claude_session_id or "",
             run.feature_id or "",
+            run.check_blockers_acked,
+            run.last_check_result or "",
         ])
 
 
@@ -221,6 +229,7 @@ def load_run(run_id: str) -> Optional[RunState]:
         "model", "created_at", "updated_at", "step_budget_used", "pr_url",
         "subscription_msgs", "subscription_tokens_in", "subscription_tokens_out",
         "claude_session_id", "feature_id",
+        "check_blockers_acked", "last_check_result",
     ]
     with _conn() as con:
         row = con.execute(
@@ -241,6 +250,8 @@ def load_run(run_id: str) -> Optional[RunState]:
     d["subscription_tokens_out"] = int(d["subscription_tokens_out"] or 0)
     d["claude_session_id"] = str(d.get("claude_session_id") or "")
     d["feature_id"] = str(d.get("feature_id") or "")
+    d["check_blockers_acked"] = bool(d.get("check_blockers_acked") or False)
+    d["last_check_result"] = str(d.get("last_check_result") or "")
     return RunState(**{k: v for k, v in d.items() if k in RunState.__dataclass_fields__})
 
 

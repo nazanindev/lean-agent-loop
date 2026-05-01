@@ -59,6 +59,27 @@ def set_plan_steps(run: RunState, steps: list) -> RunState:
     return run
 
 
+def set_check_acked(run: RunState, acked: bool) -> RunState:
+    """Persist blocker-ack state so it survives REPL restarts."""
+    run.check_blockers_acked = acked
+    save_run(run)
+    return run
+
+
+def store_check_result(run: RunState, result_json: str) -> RunState:
+    """Persist the latest flow check JSON and record its grade in decisions."""
+    import json as _json
+    run.last_check_result = result_json
+    try:
+        data = _json.loads(result_json)
+        overall = data.get("overall", "?")
+        blockers = data.get("blocker_count", 0)
+        add_decision(run, f"flow check: overall={overall}, blockers={blockers}")
+    except Exception:
+        save_run(run)
+    return run
+
+
 def complete_plan_step(run: RunState, step_id: str) -> RunState:
     """Mark a single plan step as done."""
     for step in run.plan_steps:

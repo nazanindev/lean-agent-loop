@@ -110,7 +110,9 @@ def phase_directive(run: RunState) -> str:
         return (
             "You are in the VERIFY phase. Run the full test suite and linter. "
             "If anything fails, fix it before reporting back. "
-            "Do not mark the run complete until all checks pass."
+            "Do not mark the run complete until all checks pass. "
+            "IMPORTANT: `/ship` requires a passing `flow check` run (or explicit `/ack-check` "
+            "if you accept blocker risk). Run `/check` before attempting to ship."
         )
 
     if run.phase == Phase.ship:

@@ -49,7 +49,7 @@ def _parse_claude_json_stdout(raw_out: str) -> Optional[Dict[str, Any]]:
 from flow.run_manager import (
     create_run, advance_phase, refresh_context_summary,
     add_artifact, add_decision, complete_plan_step, complete_run, get_session_briefing,
-    set_plan_steps,
+    set_plan_steps, set_check_acked, store_check_result,
 )
 from flow.context import phase_directive
 
@@ -71,7 +71,6 @@ class AutopilotREPL:
         self.auto_ship_enabled = bool(c.get("auto_ship_on_verify_pass", False))
         self.ship_branch_name = ""
         self.ship_pr_title = ""
-        self.check_blockers_pending_ack = False
         self.last_check_summary = ""
         self.session = PromptSession(
             history=FileHistory(str(HISTORY_PATH)),
@@ -175,14 +174,26 @@ class AutopilotREPL:
                 steps.append({"id": m.group(1), "description": m.group(2).strip(), "status": "pending"})
         return steps
 
-    def _extract_step_done_ids(self, text: str) -> list[str]:
-        """Extract explicit step completion markers from model output."""
-        ids: list[str] = []
+    def _extract_step_done_ids(self, text: str) -> list[tuple[str, str]]:
+        """Extract step completion markers from model output.
+
+        Supports:
+          STEP_DONE: 3
+          STEP_DONE: 3 [evidence: src/foo.py tests/test_foo.py]
+
+        Returns a list of (step_id, evidence_hint) tuples.
+        """
+        results: list[tuple[str, str]] = []
+        pattern = re.compile(
+            r"^\s*STEP_DONE\s*:\s*(\d+)"
+            r"(?:\s+\[evidence:\s*([^\]]+)\])?\s*$",
+            flags=re.IGNORECASE,
+        )
         for line in (text or "").splitlines():
-            m = re.match(r"^\s*STEP_DONE\s*:\s*(\d+)\s*$", line.strip(), flags=re.IGNORECASE)
+            m = pattern.match(line.strip())
             if m:
-                ids.append(m.group(1))
-        return ids
+                results.append((m.group(1), (m.group(2) or "").strip()))
+        return results
 
     # ── Slash commands ────────────────────────────────────────────────────────
 
@@ -438,12 +449,25 @@ class AutopilotREPL:
 
     def _ship_with_gate(self) -> None:
         """Gate ship command behind explicit PR approval when enabled."""
-        if self.check_blockers_pending_ack:
+        import json as _json
+        # Require flow check before ship.
+        if self.run and not self.run.last_check_result:
             console.print(
-                "[yellow]flow check found blocker-level issues. "
-                "Run `/ack-check` to explicitly accept risk before shipping.[/yellow]"
+                "[yellow]Run `/check` before shipping — no flow check result on record for this run.[/yellow]"
             )
             return
+        # Block on unacknowledged blockers.
+        if self.run and not self.run.check_blockers_acked and self.run.last_check_result:
+            try:
+                _data = _json.loads(self.run.last_check_result)
+                if _data.get("blocker_count", 0) > 0:
+                    console.print(
+                        "[yellow]flow check found blocker-level issues. "
+                        "Run `/ack-check` to explicitly accept risk before shipping.[/yellow]"
+                    )
+                    return
+            except Exception:
+                pass
         if self.pr_gate_enabled:
             console.print(
                 "[yellow]PR approval gate is ON. "
@@ -531,12 +555,14 @@ class AutopilotREPL:
             console.print(summary)
 
         if blockers > 0:
-            self.check_blockers_pending_ack = True
+            if self.run:
+                set_check_acked(self.run, False)
             console.print("[red]Blocker findings detected. Shipping now requires `/ack-check`.[/red]")
             if prompt_ack:
                 self._ack_check_prompt()
         else:
-            self.check_blockers_pending_ack = False
+            if self.run:
+                set_check_acked(self.run, False)
         return report
 
     def _ack_check_prompt(self) -> None:
@@ -546,17 +572,28 @@ class AutopilotREPL:
         except (EOFError, KeyboardInterrupt):
             answer = ""
         if answer in {"y", "yes"}:
-            self.check_blockers_pending_ack = False
+            if self.run:
+                set_check_acked(self.run, True)
             console.print("[yellow]Risk acknowledged. /ship is now allowed.[/yellow]")
         else:
             console.print("[dim]Shipping remains blocked until `/ack-check` is run.[/dim]")
 
     def _ack_check(self) -> None:
         """Explicitly acknowledge blocker-level checker findings."""
-        if not self.check_blockers_pending_ack:
+        if not self.run:
+            console.print("[dim]No active run.[/dim]")
+            return
+        import json as _json
+        has_blockers = False
+        if self.run.last_check_result:
+            try:
+                has_blockers = _json.loads(self.run.last_check_result).get("blocker_count", 0) > 0
+            except Exception:
+                pass
+        if not has_blockers:
             console.print("[dim]No pending blocker findings to acknowledge.[/dim]")
             return
-        self.check_blockers_pending_ack = False
+        set_check_acked(self.run, True)
         console.print("[yellow]Acknowledged flow check blockers. You can now run /ship.[/yellow]")
 
     def _on_enter_verify(self, prev_phase: Phase) -> None:
