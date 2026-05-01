@@ -76,8 +76,11 @@ def phase_directive(run: RunState) -> str:
             "- File-level actions (create / edit / delete)\n"
             "- Test or verification steps\n"
             "- Any migration or config changes\n\n"
-            "When the plan is complete, call ExitPlanMode with the numbered list. "
-            "AI Flow will parse it, set the step budget, and transition to execute automatically."
+            "FORMAT REQUIREMENT (strict): output one step per line as `1. ...`, `2. ...`, etc. "
+            "or `Step 1: ...`, `Step 2: ...`. Do not use prose summaries like "
+            "`my plan has one step` and do not collapse steps into a paragraph.\n\n"
+            "When the plan is complete, call ExitPlanMode with that structured numbered list. "
+            "AI Flow will parse it and move to the next phase based on gate settings."
         )
 
     if run.phase == Phase.execute:

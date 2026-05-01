@@ -119,9 +119,10 @@ class AutopilotREPL:
         return f"flow [{inner}] > "
 
     def _parse_numbered_plan_steps(self, text: str) -> list[dict]:
-        """Parse numbered plan lines from assistant output as a fallback."""
+        """Parse strictly structured numbered plan steps from assistant output."""
         steps = []
-        for line in (text or "").splitlines():
+        raw = text or ""
+        for line in raw.splitlines():
             m = re.match(
                 r"^\s*(?:\*\*)?\s*(?:step\s*)?(\d+)(?:\s*\*\*)?\s*(?:[.)]|:|—|-)\s+(.+)$",
                 line,

@@ -28,10 +28,11 @@ from flow.observe import trace_subagent
 
 
 def _parse_plan_steps(plan_text: str) -> list:
-    """Parse numbered list items from Claude's ExitPlanMode plan_text."""
+    """Parse strictly structured numbered plan steps from ExitPlanMode."""
     import re
     steps = []
-    for line in plan_text.splitlines():
+    raw = plan_text or ""
+    for line in raw.splitlines():
         m = re.match(
             r"^\s*(?:\*\*)?\s*(?:step\s*)?(\d+)(?:\s*\*\*)?\s*(?:[.)]|:|—|-)\s+(.+)$",
             line,
