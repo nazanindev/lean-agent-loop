@@ -90,6 +90,9 @@ AP_PLAN=pro                          # your claude.ai plan: pro | max5 | max20 |
 
 LANGFUSE_PUBLIC_KEY=pk-lf-...        # optional — free at cloud.langfuse.com
 LANGFUSE_SECRET_KEY=sk-lf-...        # optional
+
+AP_DB_PATH=~/.autopilot/costs.duckdb # optional — override DuckDB location
+AP_BUDGET_USD=1.00                   # optional — override API spend gate (default: $1.00)
 ```
 
 If `flow` isn't found after install, add Python's user bin to your PATH:
@@ -138,6 +141,7 @@ Quick intake — press Enter to skip any field.
 | `/done` | Mark current run complete |
 | `/status` | Show quota window + API spend + run state |
 | `/quit` | Exit |
+| `/help` | Show all slash commands |
 
 ### CLI commands
 
@@ -151,7 +155,9 @@ flow verify              # run tests/lint for the current project
 flow ship                # verify → AI commit message → git commit → AI PR description → gh pr create
 flow resume [run-id]     # resume an interrupted run (shows picker if no ID given)
 flow serve               # local dashboard on :7331
+flow serve --port 8080   # serve on a custom port
 flow ci-review --pr 42   # AI code review for a PR (used by GitHub Actions)
+flow ci-review --diff path/to/file.diff  # review from a local diff file
 ```
 
 ---
