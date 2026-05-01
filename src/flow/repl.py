@@ -121,6 +121,44 @@ class AutopilotREPL:
         inner = " | ".join(parts)
         return f"flow [{inner}] > "
 
+    def _print_lifecycle_nudge(self) -> None:
+        """Show current lifecycle phase and suggested next commands."""
+        if not self.run:
+            console.print("[bold cyan][lifecycle][/bold cyan] [cyan]idle → type a goal to start a run[/cyan]")
+            return
+        phase = self.run.phase
+        if phase == Phase.plan:
+            if self.run.plan_steps:
+                console.print(
+                    "[bold cyan][lifecycle][/bold cyan] [cyan]plan[/cyan] [yellow]Suggested:[/yellow] "
+                    "[green]/approve[/green] to execute, [green]/reject[/green] to re-plan, [green]/status[/green]"
+                )
+            else:
+                console.print(
+                    "[bold cyan][lifecycle][/bold cyan] [cyan]plan[/cyan] [yellow]Suggested:[/yellow] "
+                    "ask for numbered steps, then [green]/approve[/green]; [green]/status[/green]"
+                )
+            return
+        if phase == Phase.execute:
+            console.print(
+                "[bold cyan][lifecycle][/bold cyan] [cyan]execute[/cyan] [yellow]Suggested:[/yellow] "
+                "continue task, [green]/next[/green] when step is done, [green]/status[/green]"
+            )
+            return
+        if phase == Phase.verify:
+            ship_hint = "/ship" if not self.pr_gate_enabled else "/gate pr off then /ship"
+            console.print(
+                f"[bold cyan][lifecycle][/bold cyan] [cyan]verify[/cyan] [yellow]Suggested:[/yellow] "
+                f"[green]/verify[/green], [green]{ship_hint}[/green], [green]/status[/green]"
+            )
+            return
+        if phase == Phase.ship:
+            console.print(
+                "[bold cyan][lifecycle][/bold cyan] [cyan]ship[/cyan] [yellow]Suggested:[/yellow] "
+                "[green]/status[/green], [green]/done[/green]"
+            )
+            return
+
     def _parse_numbered_plan_steps(self, text: str) -> list[dict]:
         """Parse strictly structured numbered plan steps from assistant output."""
         steps = []
@@ -210,6 +248,8 @@ class AutopilotREPL:
             self._show_help()
         else:
             console.print(f"[red]Unknown command: {verb}[/red]")
+        if verb not in ("/help", "/quit", "/exit", "/q"):
+            self._print_lifecycle_nudge()
         return True
 
     def _run_nested_flow_cli(self, argv: list[str]) -> None:
@@ -918,11 +958,13 @@ class AutopilotREPL:
                     f"\n[bold]New run {self.run.run_id}[/bold] | "
                     f"phase: {self.run.phase.value} | model: {model}"
                 )
+                self._print_lifecycle_nudge()
                 launch_task = goal
             else:
                 launch_task = user_input
 
             self._run_turn(launch_task)
+            self._print_lifecycle_nudge()
 
 
 def start_repl() -> None:
