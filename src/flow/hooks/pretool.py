@@ -127,6 +127,22 @@ def main() -> None:
         if allowed_cmds and base_cmd and base_cmd not in allowed_cmds:
             block(f"Bash command '{base_cmd}' not in allowed_bash_commands whitelist.")
 
+    # ── Soft WIP=1 guidance (warn only) ──────────────────────────────────────
+    if tool_name in {"Write", "Edit", "MultiEdit"}:
+        try:
+            from flow.features import get_active_feature
+
+            active_feature = get_active_feature()
+            if not active_feature:
+                print(
+                    "[flow warn] No active feature in features.yaml. "
+                    "Run `flow features pick` before writing to keep WIP=1.",
+                    file=sys.stderr,
+                )
+        except Exception:
+            # Feature primitive is optional; never block tool execution here.
+            pass
+
     # ── Step counter (weighted) ───────────────────────────────────────────────
     if run and tool_name not in ("", "Agent"):
         tool_weights = c.get("tool_weights", {})
