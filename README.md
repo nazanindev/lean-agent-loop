@@ -1,61 +1,23 @@
 # `flow`
 
-CLI **orchestrator** for AI-assisted development: it owns phase transitions, persisted `RunState`, hook-enforced policy, and the utility calls around Claude Code (verify, check, ship, review) — the model session is a **worker** inside that loop, not the whole system.
+**Cost-aware, model-agnostic CLI orchestrator for bounded LLM development workflows.**
 
-Happy path stays prompt → patch → PR → review → merge; the orchestration layer keeps runs bounded (context, spend, gates, resumability).
+`flow` wraps any LLM coding agent as a supervised worker: it owns phase transitions, persisted `RunState`, hook-enforced spend and step limits, and the utility calls (verify, check, ship, review) that sit outside the model session. The model is a worker inside that loop — not the whole system. Claude Code is the first supported worker.
 
----
-
-## The problem
-
-- Limited visibility into real-time token usage and API spend
-- Uncontrolled subagent spawning increases cost and resets context
-- Manual switching between models adds cognitive overhead
-- Creating PRs and triggering code reviews is friction after every task
-- Long-running conversations bloat context with no structured compression
-
-AI Flow treats the model as an **untrusted subprocess**: every constraint is enforced by hooks, not hoped for.
+Happy path: prompt → patch → PR → review → merge.
 
 ---
 
-## Harness engineering principles
+## Why
 
-**Configuration-driven enforcement.** `constraints.yaml` is applied in `PreToolUse` / `Stop` (budgets, bash allowlist, spawn gates, API spend caps). Host-side gates; model output does not bypass them.
+Running LLM coding sessions without a harness means:
 
-**Explicit phase machine, persisted run state.** Phases: `plan → execute → verify → ship`. `RunState` lives in DuckDB; each turn injects a structured briefing (goal, phase, plan steps, artifacts, decisions), not a chat transcript.
+- **No cost visibility** — token usage and API spend are opaque until the bill arrives
+- **No model discipline** — every task defaults to the same (expensive) model regardless of complexity
+- **No bounds** — subagent spawning, context bloat, and runaway sessions go unchecked
+- **No workflow** — shipping, reviewing, and PR creation are manual steps bolted on after the fact
 
-**Repo-scoped product state.** `features.yaml` holds feature intent and verification commands (`flow features`, `flow init --repo`); versioned with the repo, distinct from session DB.
-
-**Separate implementation and review.** Execute loop vs `flow check` over `git diff HEAD` (rubric, structured output). Blocker findings can require acknowledgement before `/ship`.
-
-**Completion tied to checks.** `flow verify` plus Stop-hook clean-state rules (verify/ship phases) bind “done” to test exit status and working-tree hygiene.
-
-**Two cost surfaces.** Claude Code: subscription quota. `flow` utilities (`ship`, `ci-review`, `check`, …): API-metered USD. Tracked separately.
-
-**Explicit human approvals.** Plan (`/approve`, `/reject`), PR (`/gate pr`), optional checker acknowledgement before ship when policy requires it.
-
-**Orchestrator vs worker session.** The CLI / REPL owns scheduling (phases, utilities, billing hooks, `RunState` I/O). Each Claude Code run is a bounded worker turn under that supervision — not the sole locus of policy or persistence.
-
-### References
-
-1. OpenAI — [*Harness engineering: leveraging Codex in an agent-first world*](https://openai.com/index/harness-engineering/)
-2. Anthropic — [*Building effective agents*](https://www.anthropic.com/research/building-effective-agents/)
-3. Anthropic — [*Harness design for long-running application development*](https://www.anthropic.com/engineering/harness-design-long-running-apps/)
-
----
-
-## Self-hosted development
-
-Harness changes are exercised on this repo with the same surface users run: `flow` REPL (Claude Code subprocess with hooks), `flow verify`, `flow check`, ship/review paths, and `constraints.yaml` / hook behavior under real sessions. Regressions surface through those entrypoints, not only through README or design notes.
-
----
-
-## Direction (planned)
-
-Work in progress on the orchestration layer itself:
-
-- **Multi-agent / multi-session coordination** — first-class scheduling, isolation, and budgets when more than one Claude Code session participates in the same run (parallel workers, shared `RunState`, clearer handoffs).
-- **Git worktrees** — run tasks in disposable trees with explicit linkage from `RunState` / verify / check to the correct checkout, so parallel streams do not fight the default working tree.
+`flow` enforces all three properties at the host level — cost tracking, model routing by phase, and hard step/spend gates — so the model can't opt out of them.
 
 ---
 
@@ -65,7 +27,15 @@ Work in progress on the orchestration layer itself:
 flow (orchestrator) → Claude Code worker session (hooks) → flow verify | flow check | flow ship → CI / review
 ```
 
-Architecture at a glance — **host** owns state and policy; **worker** is one headless Claude Code turn under hooks; **utilities** are invoked by `flow` outside that subprocess.
+Three properties enforced by the harness, not the model:
+
+| Property | Mechanism |
+|---|---|
+| **Cost-aware** | Two billing surfaces tracked separately (subscription quota + API USD); spend gate blocks utility calls over budget |
+| **Model-agnostic** | Any LLM worker can be plugged in — the orchestrator's phases, briefings, and constraints are model-independent; Claude Code is the current worker, others are planned |
+| **Bounded** | Weighted step budgets per phase, bash allowlist, subagent spawn gate, context compression on `/new` |
+
+The **host** owns state and policy; the **worker** is one headless Claude Code turn under hooks; **utilities** are invoked by `flow` outside that subprocess.
 
 ```mermaid
 flowchart TB
@@ -81,7 +51,14 @@ flowchart TB
     CC --- HK
   end
 
+  subgraph worker2["Worker — e.g. GPT-4o · 🚧 planned"]
+    CC2["Headless session"]
+    HK2["Same hook interface"]
+    CC2 --- HK2
+  end
+
   CY["constraints.yaml"] --> HK
+  CY -.-> HK2
 
   subgraph util["Utilities — flow CLI entrypoints"]
     V["flow verify"]
@@ -92,52 +69,22 @@ flowchart TB
   GIT["git / gh / PR / CI"]
 
   R --> CC
+  R -.-> CC2
   R --> V
   R --> CH
   R --> SH
   SH --> GIT
 ```
 
-State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected — not a transcript. This keeps context cheap, runs resumable, and cost attributable.
+> Dashed lines indicate planned capability — the orchestrator is designed to be model-agnostic; Claude Code is the first supported worker.
+>
+> **Note on enforcement:** current constraints are implemented via Claude Code hooks, which are Claude Code-specific and bypassable outside `flow`. The direction is API-forward enforcement that generalizes across workers. See [ENGINEERING.md](ENGINEERING.md#known-limitations).
 
-### RunState lifecycle
+State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected — not a transcript. Context stays cheap, runs are resumable, and cost is attributable per run.
 
-```
-plan → execute → verify → ship
-```
-
-Each phase selects a different model tier and enforces different constraints. Phase transitions are explicit — either from a slash command or from AI Flow routing based on task keywords.
-
-### Hooks
-
-Three Claude Code hooks run for `flow` sessions via `~/.claude/settings.json`, plus one git hook installed per-repo:
-
-| Hook | File | Purpose |
-|---|---|---|
-| `Stop` | `hooks/stop.py` | Captures token usage → subscription quota window (DuckDB + Langfuse) on session end |
-| `PreToolUse` | `hooks/pretool.py` | Step counter, bash allowlist, Agent spawn gate, API spend gate, quota warnings |
-| `PreCompact` | `hooks/precompact.py` | Injects custom compaction prompt that preserves RunState artifacts |
-| `post-merge` (git) | `hooks/postmerge.py` | Checks the active run's PR via `gh`; auto-closes the run when the PR is merged |
-
-Hooks only fire when you launch Claude Code through `flow` — regular `claude` sessions are unaffected.
+Phases: `plan → execute → verify → ship`. Each phase enforces its own step budget and selects the appropriate model (currently Opus / Sonnet / Haiku within Claude). The briefing format and constraint layer are model-independent — swapping the worker doesn't require changing how the orchestrator runs.
 
 ---
-
-## Two billing surfaces
-
-AI Flow tracks two distinct cost surfaces separately — mixing them up produces meaningless numbers:
-
-| Surface | Auth | Billing | What flow tracks |
-|---|---|---|---|
-| **Claude Code sessions** | `claude login` (claude.ai Pro/Max) | Flat subscription — $0 per session | 5-hour quota window msgs + tokens |
-| **flow utility calls** | `ANTHROPIC_API_KEY` | Per-token API billing | Real USD per call (ship, ci-review, check) |
-
-**Why the split matters:** Claude Code interactive sessions (the big coding loop) run against your Pro/Max subscription. They cost you $0 marginal, but they burn through your 5-hour message window. The `flow` CLI itself makes direct SDK calls for utilities such as ship, review, and check — those are metered and cost real money (typically cents, Haiku-heavy).
-
-**Trust boundary:** If you flip to API mode (`AP_FORCE_API_KEY=1`), set a workspace spend cap in the [Anthropic console](https://console.anthropic.com) — flow's gates don't protect against runaway in-session spend. The guards here only gate the flow utility calls.
-
----
-
 
 ## Prerequisites
 
@@ -156,21 +103,20 @@ pip install -e .
 flow init
 ```
 
-`flow init` writes the hooks into `~/.claude/settings.json` and creates `~/.autopilot/.env` with a template. Fill in your keys:
+`flow init` writes hooks into `~/.claude/settings.json` and creates `~/.autopilot/.env`. Fill in your keys:
 
 ```sh
-# ~/.autopilot/.env
-ANTHROPIC_API_KEY=sk-ant-...         # for flow utility calls (ship, ci-review, check, clarify)
-AP_PLAN=pro                          # your claude.ai plan: pro | max5 | max20 | api_only
+ANTHROPIC_API_KEY=sk-ant-...         # for flow utility calls (ship, ci-review, check)
+AP_PLAN=pro                          # claude.ai plan: pro | max5 | max20 | api_only
 
-LANGFUSE_PUBLIC_KEY=pk-lf-...        # optional — free at cloud.langfuse.com
+LANGFUSE_PUBLIC_KEY=pk-lf-...        # optional
 LANGFUSE_SECRET_KEY=sk-lf-...        # optional
 
 AP_DB_PATH=~/.autopilot/costs.duckdb # optional — override DuckDB location
 AP_BUDGET_USD=1.00                   # optional — override API spend gate (default: $1.00)
 ```
 
-If `flow` isn't found after install, add Python's user bin to your PATH:
+If `flow` isn't found after install:
 
 ```sh
 echo 'export PATH="$HOME/Library/Python/3.9/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
@@ -186,9 +132,7 @@ echo 'export PATH="$HOME/Library/Python/3.9/bin:$PATH"' >> ~/.zshrc && source ~/
 flow
 ```
 
-Type a task in natural language. AI Flow runs a short **structured intake** in the REPL (optional fields), then runs **Claude Code headlessly** (`claude -p` with JSON output): each turn is one bounded agentic pass, the reply is printed in the terminal, and the same Claude session is **resumed** on the next message until you `/done`. Hooks (`PreToolUse`, `Stop`, …) only run when `flow` sets `AP_ACTIVE=1` on that subprocess, so a normal interactive `claude` session elsewhere is unaffected. Subscription quota + API utility spend are still tracked.
-
-The REPL now gives phase-aware nudges ("lifecycle" hints), supports explicit plan approval (`/approve` / `/reject`), and auto-marks plan steps complete in execute mode when the model emits `STEP_DONE: <id>`.
+Type a task in natural language. Flow runs a short intake, then runs Claude Code headlessly (`claude -p`). Each turn is one bounded agentic pass; the same session is **resumed** on the next message until you `/done`. Hooks only fire on `flow`-launched subprocesses — a normal `claude` session elsewhere is unaffected.
 
 ```
 flow [plan:sonnet|step:0/30|wt:0.0|api:$0.00|quota:3/45] > add JWT authentication to the API
@@ -208,21 +152,21 @@ Quick intake — press Enter to skip any field.
 | `/fast` | Switch to Haiku (quick tasks) |
 | `/model opus\|sonnet\|haiku` | Force a specific model |
 | `/no-agents` | Toggle subagent spawn blocking |
-| `/budget $X` | Set API spend gate (applies to utility calls) |
+| `/budget $X` | Set API spend gate |
 | `/new` | Compress context, start fresh session with RunState injected |
 | `/compact` | Same as `/new` |
-| `/resume [run_id]` | Resume an interrupted run (picker if no ID given) |
+| `/resume [run_id]` | Resume an interrupted run |
 | `/skip-plan` | Skip planning, go straight to execute |
-| `/approve` | Approve captured plan and immediately start execute turn |
-| `/reject` | Clear captured plan and stay in plan |
-| `/next` / `/step-done [id]` | Mark plan step done (auto-advance to verify when complete) |
-| `/gate plan on\|off` | Toggle plan approval gate for this session |
-| `/gate pr on\|off` | Toggle PR approval gate for this session |
-| `/gate autoship on\|off` | Auto-run `/ship` after `/verify` passes in verify phase |
-| `/ship-branch <name>` | Set or clear branch name override for `/ship` |
-| `/ship-title <title>` | Set or clear PR title override for `/ship` |
+| `/approve` | Approve captured plan and start execute turn |
+| `/reject` | Clear captured plan, stay in plan |
+| `/next` / `/step-done [id]` | Mark plan step done |
+| `/gate plan on\|off` | Toggle plan approval gate |
+| `/gate pr on\|off` | Toggle PR approval gate |
+| `/gate autoship on\|off` | Auto-run `/ship` after `/verify` passes |
+| `/ship-branch <name>` | Set branch name override for `/ship` |
+| `/ship-title <title>` | Set PR title override for `/ship` |
 | `/verify` | Run tests/lint for current project |
-| `/check` | Run independent diff checker (`flow check`) |
+| `/check` | Run independent diff checker |
 | `/ack-check` | Acknowledge checker blockers so `/ship` can proceed |
 | `/ship` | Verify → commit → create PR |
 | `/done` | Mark current run complete |
@@ -242,11 +186,11 @@ flow verify              # run tests/lint for the current project
 flow check               # independent reviewer on git diff HEAD (optional --json)
 flow ship                # verify → AI commit message → git commit → AI PR description → gh pr create
 flow ship --branch-name feat/my-name --pr-title "My PR title"
-flow resume [run-id]     # resume an interrupted run (shows picker if no ID given)
+flow resume [run-id]     # resume an interrupted run
 flow serve               # local dashboard on :7331
-flow serve --port 8080   # serve on a custom port
+flow serve --port 8080
 flow ci-review --pr 42   # AI code review for a PR (used by GitHub Actions)
-flow ci-review --diff path/to/file.diff  # review from a local diff file
+flow ci-review --diff path/to/file.diff
 flow features list       # list feature state from features.yaml
 flow features add F01 "POST /x returns 201" --verify "pytest tests/test_x.py -x"
 flow features pick       # set one active feature (WIP=1)
@@ -257,17 +201,13 @@ flow features verify     # run active feature verification and mark passing/bloc
 
 ## Phase routing
 
-AI Flow automatically selects a model based on the current phase. You can override at any time with `/model` or by editing `routing.yaml`.
-
 | Phase | Model | When |
 |---|---|---|
 | Plan | `claude-opus-4-7` | Architecture, design, first session on a task |
 | Execute | `claude-sonnet-4-6` | Implementation once a plan exists |
 | Fast / CI | `claude-haiku-4-5-20251001` | Quick questions, lightweight tasks |
 
-### Keyword overrides
-
-Task descriptions are scanned for keywords before phase routing kicks in:
+Keyword overrides (scanned before phase routing):
 
 | Keyword | Model |
 |---|---|
@@ -275,126 +215,8 @@ Task descriptions are scanned for keywords before phase routing kicks in:
 | `refactor`, `review`, `test`, `fix` | Sonnet |
 | `quick`, `explain` | Haiku |
 
----
-
-## Hard constraints
-
-Configured in `constraints.yaml` and enforced via the `PreToolUse` hook — not prompted, not hoped for:
-
-```yaml
-max_steps_per_run: 30        # fallback step ceiling
-max_tokens_per_step: 8000    # per-step token ceiling
-
-# Weighted step budgets — each tool call deducts its weight from the budget
-tool_weights:
-  Write: 2.0
-  Edit: 1.5
-  Bash: 1.0
-  Agent: 5.0
-  Read: 0.25
-  Glob: 0.1
-  Grep: 0.1
-
-# Per-phase budgets (weighted units); overrides max_steps_per_run
-phase_step_budgets:
-  plan: 20.0
-  execute: 60.0
-  verify: 20.0
-  ship: 10.0
-
-# When plan steps are parsed, max_steps = len(steps) * multiplier
-plan_steps_multiplier: 3.0
-
-# Approval gates
-plan_approval_gate: true     # require /approve before execute
-pr_approval_gate: true       # require confirmation before /ship
-
-# flow utility API spend gate (ship, ci-review, check hit ANTHROPIC_API_KEY)
-api_spend_gate_usd: 1.00     # blocks Agent spawns if today's spend >= this
-
-# Subscription quota warning (Claude Code sessions — warns, never hard-blocks)
-subscription_quota_warn_pct: 0.80
-plan_window_caps:
-  pro:      { msgs: 45 }
-  max5:     { msgs: 225 }
-  max20:    { msgs: 900 }
-
-allowed_bash_commands:       # unlisted commands are blocked
-  - git, pytest, python, uv, pip, npm, npx, gh, cat, ls, find, grep, curl, jq ...
-
-agent_spawns_allowed_in:     # subagents only during planning phase
-  - plan
-
-allowed_write_paths:
-  - "./"
-```
+Override at any time with `/model` or by editing `routing.yaml`.
 
 ---
 
-## Observability
-
-Every Claude Code session is traced to [Langfuse](https://cloud.langfuse.com) (free tier available) with:
-
-- Project (derived from `git remote get-url origin`)
-- Phase, run ID, step count
-- Token usage per session (subscription surface: $0, tokens only)
-- API spend per utility call (real $)
-- Subagent spawn events (allowed or blocked)
-
-Cost is also stored locally in `~/.autopilot/costs.duckdb` and queryable at any time via `flow stats` — no external dependency required.
-
----
-
-## API mode
-
-If you want Claude Code itself to bill via the API (instead of riding your subscription), set:
-
-```sh
-AP_FORCE_API_KEY=1   # in ~/.autopilot/.env or shell
-```
-
-The Stop hook will route session tokens through the `api` billing path and compute real USD. **Before doing this, set a workspace spend cap in the [Anthropic console](https://console.anthropic.com) — Claude Code sessions can run 2–10M tokens and flow's step gate doesn't cap in-session spend.**
-
----
-
-## Style
-
-AI Flow injects your personal style into every AI-generated artifact. `flow init` creates `~/.autopilot/style.yaml` with defaults — edit what you care about, set a section to `null` to skip it entirely:
-
-```yaml
-commit_message:
-  format: "short, imperative, no label prefix"
-  max_length: 72
-
-pr_title:
-  format: "plain description, sentence case, no prefix brackets"
-
-pr_body: |
-  ## What
-  {what}
-
-  ## Why
-  {why}
-
-  ## Checklist
-  - [ ] tests pass
-
-ci_review:
-  tone: "direct, no filler, flag real issues only"
-  severity_labels: [blocker, suggestion, nit]
-
-agent:
-  verbosity: concise
-  emoji: false
-  confirm_before_destructive: true
-
-ship:
-  branch_from_goal: true
-  branch_prefix: "feat/"
-  pr_title_from_goal: false
-  pr_title_prefix: ""
-```
-
-Per-repo overrides: create `.ap-style.yaml` in the repo root. It deep-merges on top of the global file.
-
-Each call site only receives the sections it needs — no context bloat.
+For engineering principles, constraint details, observability design, billing surfaces, and the style system, see [ENGINEERING.md](ENGINEERING.md).
