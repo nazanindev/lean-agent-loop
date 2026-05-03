@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -51,6 +52,7 @@ from flow.run_manager import (
     add_artifact, add_decision, complete_plan_step, complete_run, get_session_briefing,
     set_plan_steps, set_check_acked, store_check_result,
 )
+from flow.session_accounting import account_claude_code_session_end, usage_from_claude_result
 from flow.context import phase_directive
 
 console = Console()
@@ -830,6 +832,7 @@ class AutopilotREPL:
 
         env = os.environ.copy()
         env["AP_ACTIVE"] = "1"
+        env["AP_FLOW_HEADLESS"] = "1"
         env["AP_PLAN_GATE"] = "1" if self.plan_gate_enabled else "0"
         if self.no_agents:
             env["AP_NO_SPAWN"] = "1"
@@ -1024,6 +1027,28 @@ class AutopilotREPL:
                 console.print(f"[dim]{stderr_raw.strip()[-2000:]}[/dim]")
             return ""
 
+        if isinstance(data, dict) and self.run:
+            tin, tout, model_used, cr = usage_from_claude_result(data)
+            sid = str(data.get("session_id") or "").strip() or str(uuid.uuid4())[:8]
+            try:
+                account_claude_code_session_end(
+                    project=self.project,
+                    branch=self.branch,
+                    session_id=sid,
+                    model=model_used,
+                    tokens_in=tin,
+                    tokens_out=tout,
+                    cache_read_input_tokens=cr,
+                    run=self.run,
+                )
+            except Exception as e:
+                console.print(f"[yellow]Could not record session usage:[/yellow] {e}")
+
+            new_sid = str(data.get("session_id") or "").strip()
+            if new_sid:
+                self.run.claude_session_id = new_sid
+                save_run(self.run)
+
         if data.get("is_error") or data.get("subtype") == "error":
             err = data.get("result") or data.get("error") or str(data)
             if str(data.get("api_error_status")) == "429" or "limit" in str(err).lower():
@@ -1031,11 +1056,6 @@ class AutopilotREPL:
             else:
                 console.print(f"[red]Claude error:[/red] {err}")
             return ""
-
-        new_sid = str(data.get("session_id") or "").strip()
-        if new_sid:
-            self.run.claude_session_id = new_sid
-            save_run(self.run)
 
         result_text = (data.get("result") or "").strip()
         streamed_text = "".join(streamed_parts).strip()
