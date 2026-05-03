@@ -140,6 +140,37 @@ def main() -> None:
         if allowed_cmds and base_cmd and base_cmd not in allowed_cmds:
             block(f"Bash command '{base_cmd}' not in allowed_bash_commands whitelist.")
 
+    # ── Edit phase gate ──────────────────────────────────────────────────────
+    if tool_name in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
+        allowed_phases = c.get("edits_allowed_in", ["execute", "verify", "ship"])
+        if phase not in allowed_phases:
+            # Exempt plan files under ~/.claude/plans/ — they must be editable in plan phase
+            target_path = tool_input.get("file_path") or tool_input.get("notebook_path")
+            plan_dir = Path.home() / ".claude" / "plans"
+            if target_path:
+                try:
+                    target_resolved = Path(target_path).resolve()
+                    plan_dir_resolved = plan_dir.resolve()
+                    if target_resolved.is_relative_to(plan_dir_resolved):
+                        # Plan file — allowed even in plan phase
+                        pass
+                    else:
+                        block(
+                            f"File edits blocked: phase '{phase}' not in allowed phases {allowed_phases}. "
+                            "Use the plan phase for planning, then /approve to proceed to execute."
+                        )
+                except (ValueError, OSError):
+                    # Fallback: if path resolution fails, block conservatively
+                    block(
+                        f"File edits blocked: phase '{phase}' not in allowed phases {allowed_phases}. "
+                        "Use the plan phase for planning, then /approve to proceed to execute."
+                    )
+            else:
+                block(
+                    f"File edits blocked: phase '{phase}' not in allowed phases {allowed_phases}. "
+                    "Use the plan phase for planning, then /approve to proceed to execute."
+                )
+
     # ── Soft WIP=1 guidance (warn only) ──────────────────────────────────────
     if tool_name in {"Write", "Edit", "MultiEdit"}:
         try:

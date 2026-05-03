@@ -112,6 +112,12 @@ allowed_bash_commands:
 agent_spawns_allowed_in:
   - plan
 
+# File edits allowed only during execute, verify, ship phases (plan is read-only)
+edits_allowed_in:
+  - execute
+  - verify
+  - ship
+
 # Write operations restricted to project root
 allowed_write_paths:
   - "./"
