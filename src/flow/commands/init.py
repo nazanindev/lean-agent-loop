@@ -1,7 +1,12 @@
 """flow init — wire AI Flow hooks into ~/.claude/settings.json."""
 import json
+import os
+import shlex
 import shutil
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any, Iterator
 
 from rich.console import Console
 
@@ -11,6 +16,74 @@ SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 AP_ENV_PATH = Path.home() / ".autopilot" / ".env"
 AP_STYLE_PATH = Path.home() / ".autopilot" / "style.yaml"
 AP_ENV_EXAMPLE = Path(__file__).parent.parent.parent.parent / ".env.example"
+
+
+def _env_for_hook_subprocess() -> dict[str, str]:
+    """Environment similar to Claude Code hook children (no repo PYTHONPATH hacks)."""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+def hooks_dict() -> dict[str, Any]:
+    """Claude Code hook definitions using this install's Python (must be able to import `flow`)."""
+    py = shlex.quote(sys.executable)
+    return {
+        "Stop": [
+            {"hooks": [{"type": "command", "command": f"{py} -m flow.hooks.stop"}]}
+        ],
+        "PreToolUse": [
+            {"matcher": "", "hooks": [{"type": "command", "command": f"{py} -m flow.hooks.pretool"}]}
+        ],
+        "PreCompact": [
+            {"hooks": [{"type": "command", "command": f"{py} -m flow.hooks.precompact"}]}
+        ],
+    }
+
+
+def _iter_hook_commands(hooks: dict[str, Any]) -> Iterator[tuple[str, str]]:
+    for hook_type, configs in (hooks or {}).items():
+        if not isinstance(configs, list):
+            continue
+        for cfg in configs:
+            if not isinstance(cfg, dict):
+                continue
+            for h in cfg.get("hooks") or []:
+                if not isinstance(h, dict):
+                    continue
+                cmd = h.get("command")
+                if isinstance(cmd, str) and cmd.strip():
+                    yield hook_type, cmd.strip()
+
+
+def hook_interpreters_import_flow(hooks: dict[str, Any]) -> bool:
+    """True if every configured hook command's leading interpreter can `import flow`."""
+    seen: set[str] = set()
+    for _hook_type, cmd in _iter_hook_commands(hooks):
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            return False
+        if not parts:
+            return False
+        interp = parts[0]
+        if interp in seen:
+            continue
+        seen.add(interp)
+        try:
+            r = subprocess.run(
+                [interp, "-c", "import flow"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=_env_for_hook_subprocess(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if r.returncode != 0:
+            return False
+    return bool(seen)
+
 
 DEFAULT_STYLE = """\
 # AI Flow style — controls AI voice across all outputs.
@@ -46,18 +119,6 @@ ci_review:
   severity_labels: [blocker, suggestion, nit]
   skip_nitpicks: false
 """
-
-HOOKS = {
-    "Stop": [
-        {"hooks": [{"type": "command", "command": "python3 -m flow.hooks.stop"}]}
-    ],
-    "PreToolUse": [
-        {"matcher": "", "hooks": [{"type": "command", "command": "python3 -m flow.hooks.pretool"}]}
-    ],
-    "PreCompact": [
-        {"hooks": [{"type": "command", "command": "python3 -m flow.hooks.precompact"}]}
-    ],
-}
 
 REPO_FEATURES_TEMPLATE = """\
 features:
@@ -107,7 +168,7 @@ def cmd_init(force: bool = False, repo: bool = False) -> None:
         console.print(f"[dim]Style file already exists: {AP_STYLE_PATH}[/dim]")
 
     # ── Read existing Claude Code settings ───────────────────────────────────
-    settings = {}
+    settings: dict[str, Any] = {}
     if SETTINGS_PATH.exists():
         with open(SETTINGS_PATH) as f:
             try:
@@ -115,9 +176,11 @@ def cmd_init(force: bool = False, repo: bool = False) -> None:
             except json.JSONDecodeError:
                 settings = {}
 
-    existing_hooks = settings.get("hooks", {})
+    existing_hooks = settings.get("hooks") or {}
+    hooks_ok = hook_interpreters_import_flow(existing_hooks) if existing_hooks else False
+    broken = bool(existing_hooks) and not hooks_ok
 
-    if existing_hooks and not force:
+    if existing_hooks and not force and not broken:
         console.print(
             "[yellow]Hooks already configured in ~/.claude/settings.json.[/yellow]\n"
             "Run [bold]flow init --force[/bold] to overwrite."
@@ -128,15 +191,24 @@ def cmd_init(force: bool = False, repo: bool = False) -> None:
             _scaffold_repo_artifacts()
         return
 
-    settings["hooks"] = HOOKS
+    if broken and not force:
+        console.print(
+            "[yellow]Hook commands cannot import `flow` with their configured interpreter "
+            "(often `python3` ≠ the Python where flow is installed). Rewriting hooks to use "
+            f"this install: {sys.executable}[/yellow]"
+        )
+
+    settings["hooks"] = hooks_dict()
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(SETTINGS_PATH, "w") as f:
         json.dump(settings, f, indent=2)
 
     console.print("[green]✓ Hooks wired into ~/.claude/settings.json[/green]")
-    console.print("[dim]  Stop       → python3 -m flow.hooks.stop[/dim]")
-    console.print("[dim]  PreToolUse → python3 -m flow.hooks.pretool[/dim]")
-    console.print("[dim]  PreCompact → python3 -m flow.hooks.precompact[/dim]")
+    hd = hooks_dict()
+    for hook_type, configs in hd.items():
+        for cfg in configs:
+            for h in cfg.get("hooks", []):
+                console.print(f"[dim]  {hook_type}:[/dim] {h.get('command', '')}")
     console.print(f"\n[dim]Next: add your API keys to {AP_ENV_PATH}[/dim]")
 
     _install_git_post_merge_hook()
@@ -196,10 +268,11 @@ def _install_git_post_merge_hook() -> None:
         return
 
     hook_path = hooks_dir / "post-merge"
+    py = shlex.quote(sys.executable)
     hook_body = (
         "#!/bin/sh\n"
         "# AI Flow: auto-close active run when linked PR is merged.\n"
-        "PYTHONPATH=src python3 -m flow.hooks.postmerge || python3 -m flow.hooks.postmerge\n"
+        f"PYTHONPATH=src {py} -m flow.hooks.postmerge || {py} -m flow.hooks.postmerge\n"
     )
 
     if hook_path.exists():

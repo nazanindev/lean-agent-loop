@@ -106,12 +106,18 @@ def _failure_summary(runner: str, output: str) -> tuple[str, str, str]:
 
 def cmd_verify() -> None:
     """Run verification checks and print the result."""
+    from flow.commands.doctor import hook_health_one_liner, hook_health_ok
     from flow.tracker import init_db, load_active_run
     from flow.config import get_project_id
     from flow.run_manager import advance_phase
     from flow.tracker import Phase
 
     init_db()
+    health = hook_health_one_liner()
+    if hook_health_ok():
+        console.print(f"[dim]{health}[/dim]")
+    else:
+        console.print(f"[yellow]{health}[/yellow]")
     project = get_project_id()
     run = load_active_run(project)
 

@@ -35,6 +35,16 @@ def init(
 
 
 @app.command()
+def doctor(
+    fix: bool = typer.Option(False, "--fix", help="Rewrite hooks via `flow init --force`"),
+) -> None:
+    """Verify Claude Code hook commands can import and run AI Flow hooks."""
+    from flow.commands.doctor import cmd_doctor
+
+    cmd_doctor(fix=fix)
+
+
+@app.command()
 def status() -> None:
     """Show current run state and today's cost."""
     from flow.commands.stats import cmd_status
