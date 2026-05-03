@@ -710,6 +710,10 @@ class AutopilotREPL:
             parsed_steps = self._parse_numbered_plan_steps(response_text)
             if parsed_steps:
                 set_plan_steps(self.run, parsed_steps)
+                # Reload run from DB to ensure in-memory state matches persisted state
+                updated = load_run(self.run.run_id)
+                if updated:
+                    self.run = updated
                 if self.plan_gate_enabled:
                     console.print("[green]✓ Parsed plan from response[/green]")
                 else:
@@ -717,6 +721,13 @@ class AutopilotREPL:
                     self.run.phase = Phase.execute
                     console.print(
                         "[green]✓ Parsed plan from response — auto-advanced to execute[/green]"
+                    )
+            else:
+                # No steps found — log what we saw for debugging
+                if response_text.strip():
+                    console.print(
+                        "[dim][info] No numbered plan steps found in response. "
+                        "Steps must be formatted as: '1. Description', '2. Description', etc.[/dim]"
                     )
 
         # Execute-phase completion signal from the model.
