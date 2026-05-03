@@ -2,9 +2,10 @@
 
 **Cost-aware, model-agnostic CLI orchestrator for bounded LLM development workflows.**
 
-`flow` wraps any LLM coding agent as a supervised worker: it owns phase transitions, persisted `RunState`, hook-enforced spend and step limits, and the utility calls (verify, check, ship, review) that sit outside the model session. The model is a worker inside that loop — not the whole system. Claude Code is the first supported worker.
+`flow` wraps any LLM coding agent as a supervised worker: it owns phase transitions, persisted `RunState`, hook-enforced spend and step limits, and the utility calls (verify, check, ship, review) that sit outside the model session. The model is a worker inside that loop — not the whole system. Claude Code is the first worker; others can be plugged in.
 
-Happy path: prompt → patch → PR → review → merge.
+**Happy path:**  
+`prompt → patch → PR → review → merge`
 
 ---
 
@@ -12,12 +13,10 @@ Happy path: prompt → patch → PR → review → merge.
 
 Running LLM coding sessions without a harness means:
 
-- **No cost visibility** — token usage and API spend are opaque until the bill arrives
-- **No model discipline** — every task defaults to the same (expensive) model regardless of complexity
-- **No bounds** — subagent spawning, context bloat, and runaway sessions go unchecked
-- **No workflow** — shipping, reviewing, and PR creation are manual steps bolted on after the fact
-
-`flow` enforces all three properties at the host level — cost tracking, model routing by phase, and hard step/spend gates — so the model can't opt out of them.
+- **No cost visibility** — API spend is opaque
+- **No model discipline** — tasks default to expensive models
+- **No bounds** — subagent spawning + context bloat + runaway sessions
+- **No workflow** — PR/review/ship are manual
 
 ---
 
@@ -35,15 +34,15 @@ Three properties enforced by the harness, not the model:
 | **Model-agnostic** | Any LLM worker can be plugged in — the orchestrator's phases, briefings, and constraints are model-independent; Claude Code is the current worker, others are planned |
 | **Bounded** | Weighted step budgets per phase, bash allowlist, subagent spawn gate, context compression on `/new` |
 
-The **host** owns state and policy; the **worker** is one headless Claude Code turn under hooks; **utilities** are invoked by `flow` outside that subprocess.
+The **host** owns state and policy; the **worker** is one headless Claude Code turn under hooks; utilities run outside the model process and cannot be bypassed.
 
-### Scaling plan
+State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected so context stays cheap, runs are resumable, and cost is attributable per run.
 
-**Today** is one serial worker per run (Planned: [ENGINEERING.md](docs/ENGINEERING.md#map-reduce-scaling-path)).
+Phases: `plan → execute → verify → ship`. Each phase enforces its own step budget and selects the appropriate model (currently Opus / Sonnet / Haiku within Claude). The briefing format and constraint layer are model-independent.
 
-#### Today
+### Scaling
 
-Read as **columns**: orchestrator (vertical stack) → worker → utilities. Hooks read policy and write usage into DuckDB — omitted as edges so lines do not cut back through the box.
+**Today:** One serial worker per run.
 
 ```mermaid
 flowchart LR
@@ -76,30 +75,35 @@ flowchart LR
   repl --> utilities
 ```
 
-#### Target (map reduce)
+**Target:** Parallel workers; 2 scaling modes. ([Map/reduce design](docs/ENGINEERING.md#map-reduce-scaling-path))
 
 ```mermaid
 flowchart LR
-  subgraph orchTarget [Orchestrator]
+  subgraph orchTarget["Orchestrator"]
+    direction TB
     logic["Business logic"]
     mapStep["Map"]
     state[("RunState")]
     reduceStep["Reduce"]
+
     logic --> mapStep
     mapStep --> state
     reduceStep --> state
   end
-  pool["N workers"]
+
+  subgraph workers["Worker Pool"]
+    direction TB
+    w1["Worker 1"]
+    w2["Worker 2"]
+    wN["Worker N"]
+  end
+
   tooling["Tools"]
 
-  mapStep --> pool
-  pool --> reduceStep
+  mapStep --> workers
+  workers --> reduceStep
   reduceStep --> tooling
 ```
-
-State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected — not a transcript. Context stays cheap, runs are resumable, and cost is attributable per run.
-
-Phases: `plan → execute → verify → ship`. Each phase enforces its own step budget and selects the appropriate model (currently Opus / Sonnet / Haiku within Claude). The briefing format and constraint layer are model-independent — swapping the worker doesn't require changing how the orchestrator runs.
 
 ---
 
