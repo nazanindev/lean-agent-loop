@@ -42,7 +42,7 @@ Work in progress on the orchestration layer:
 
 ## Map-reduce scaling path
 
-The README **Scaling plan** figure: **map** assigns bounded units to workers under a stable contract (briefing in, artifacts and markers out); **reduce** is the host merging into `RunState`, gates, and **tools** (`verify`, `check`, `ship`, `gh`) — not the model. Business logic (constraints, routing, features) drives map/reduce decisions but runs on the host.
+The README **Scaling plan** has two figures: **Today** (serial Claude Code + hooks + utilities) and **Target** below. **Target** is the abstraction: **map** assigns bounded units to workers under a stable contract (briefing in, artifacts and markers out); **reduce** is the host merging into `RunState`, gates, and **tools** (`verify`, `check`, `ship`, `gh`) — not the model. **Business logic** (constraints, routing, features, phase gates) is **part of the orchestrator** — config on disk, evaluation and scheduling in the REPL — not a separate runtime from map/reduce.
 
 ### Two scaling modes
 
@@ -66,7 +66,7 @@ Model-agnostic in principle. **Today:** Claude Code + hooks ([limitations](#know
 
 ### Current baseline
 
-**N = 1**, serial turns: one worker role, one run, DuckDB `RunState`, host utilities. The README diagram is **direction**, not full parallel product yet.
+**N = 1**, serial turns: one worker role, one run, DuckDB `RunState`, host utilities — matches the README **Today** figure. The **Target** figure is **direction**, not full parallel product yet.
 
 ---
 

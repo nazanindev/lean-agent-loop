@@ -39,36 +39,62 @@ The **host** owns state and policy; the **worker** is one headless Claude Code t
 
 ### Scaling plan
 
-Map → **N** model-agnostic workers → reduce → host **tools**. Think **N = 1** today (serial Claude turns); [ENGINEERING.md](docs/ENGINEERING.md#map-reduce-scaling-path) carries the rest.
+**Today** is one serial worker per run (Planned: [ENGINEERING.md](docs/ENGINEERING.md#map-reduce-scaling-path)).
+
+#### Today
+
+Read as **columns**: orchestrator (vertical stack) → worker → utilities. Hooks read policy and write usage into DuckDB — omitted as edges so lines do not cut back through the box.
 
 ```mermaid
-flowchart TB
-  businessLogic["Business logic — rules, budgets, routing"]
+flowchart LR
+  %% --- Orchestrator ---
+  subgraph orchestrator["Orchestrator"]
+    direction TB
+    policy["Policy (YAML)"]
+    repl["flow REPL"]
+    state[("Run State (DuckDB)")]
 
-  subgraph orchestrator [Orchestrator]
-    mapStep["Map — fan out work items or turns"]
-    stateStore[("Shared state — RunState")]
-    reduceStep["Reduce — merge results, gates, next phase"]
-    mapStep --> stateStore
-    reduceStep --> stateStore
+    policy --> repl
+    repl <--> state
   end
 
-  subgraph workerGrid [Workers — N backends same contract]
-    w1["Agent runtime 1"]
-    w2["Agent runtime 2"]
-    w3["Agent runtime N"]
+  %% --- Worker ---
+  worker["Claude Code (with hooks)"]
+
+  %% --- Utilities ---
+  subgraph utilities["Utilities"]
+    direction TB
+    util["verify / check / ship"]
+    git["Git / GitHub"]
+
+    util --> git
   end
 
-  tools["Tools — verify, check, ship, git or gh"]
+  %% --- Data / Control Flow ---
+  repl -->|serial execution| worker
+  policy -.->|hook injection| worker
+  repl --> utilities
+```
 
-  businessLogic --> mapStep
-  mapStep --> w1
-  mapStep --> w2
-  mapStep --> w3
-  w1 --> reduceStep
-  w2 --> reduceStep
-  w3 --> reduceStep
-  reduceStep --> tools
+#### Target (map reduce)
+
+```mermaid
+flowchart LR
+  subgraph orchTarget [Orchestrator]
+    logic["Business logic"]
+    mapStep["Map"]
+    state[("RunState")]
+    reduceStep["Reduce"]
+    logic --> mapStep
+    mapStep --> state
+    reduceStep --> state
+  end
+  pool["N workers"]
+  tooling["Tools"]
+
+  mapStep --> pool
+  pool --> reduceStep
+  reduceStep --> tooling
 ```
 
 State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected — not a transcript. Context stays cheap, runs are resumable, and cost is attributable per run.
