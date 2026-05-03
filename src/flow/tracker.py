@@ -464,18 +464,21 @@ def get_recent_runs(project: Optional[str] = None, limit: int = 10) -> list:
         if project:
             rows = con.execute("""
                 SELECT run_id, goal, phase, status, cost_usd, updated_at,
-                       subscription_msgs, subscription_tokens_in, subscription_tokens_out
+                       subscription_msgs, subscription_tokens_in, subscription_tokens_out,
+                       project, branch
                 FROM runs WHERE project = ?
                 ORDER BY updated_at DESC LIMIT ?
             """, [project, limit]).fetchall()
         else:
             rows = con.execute("""
                 SELECT run_id, goal, phase, status, cost_usd, updated_at,
-                       subscription_msgs, subscription_tokens_in, subscription_tokens_out
+                       subscription_msgs, subscription_tokens_in, subscription_tokens_out,
+                       project, branch
                 FROM runs ORDER BY updated_at DESC LIMIT ?
             """, [limit]).fetchall()
     cols = [
         "run_id", "goal", "phase", "status", "cost_usd", "updated_at",
         "subscription_msgs", "subscription_tokens_in", "subscription_tokens_out",
+        "project", "branch",
     ]
     return [dict(zip(cols, r)) for r in rows]

@@ -37,6 +37,8 @@ _HTML = """<!DOCTYPE html>
   .phase { font-size: 0.7rem; color: #58a6ff; text-transform: uppercase; }
   #refresh { font-size: 0.7rem; color: #8b949e; float: right; cursor: pointer; background: none; border: none; color: #8b949e; }
   #refresh:hover { color: #58a6ff; }
+  .btn-stop { background: #da3633; color: #fff; border: none; border-radius: 6px; padding: 0.3rem 0.8rem; font-size: 0.75rem; cursor: pointer; margin-top: 0.75rem; }
+  .btn-stop:hover { background: #b62324; }
   .section-label { font-size: 0.65rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem; }
 </style>
 </head>
@@ -44,6 +46,10 @@ _HTML = """<!DOCTYPE html>
 <h1>⚡ AI Flow <button id="refresh" onclick="load()">↻ refresh</button></h1>
 <div id="app"><p style="color:#8b949e">Loading...</p></div>
 <script>
+async function stopSession() {
+  const r = await fetch('/stop', {method: 'POST'});
+  if (r.ok) load();
+}
 async function load() {
   const [status, stats, runs] = await Promise.all([
     fetch('/status').then(r=>r.json()),
@@ -74,6 +80,7 @@ async function load() {
         <div class="sub">Step ${r.current_step}/${r.max_steps} &middot; API: $${r.cost_usd.toFixed(4)} &middot; ~$${projected} projected</div>
         <div class="sub">Subscription: ${r.subscription_msgs} msgs &middot; ${((r.subscription_tokens_in||0)+(r.subscription_tokens_out||0)).toLocaleString()} tokens</div>
         <div class="bar-wrap"><div class="bar ${runPct>80?'warn':''}" style="width:${runPct}%"></div></div>
+        <button class="btn-stop" onclick="stopSession()">⏹ Stop session</button>
       </div>`;
   }
 
@@ -161,11 +168,12 @@ def cmd_serve(port: int = 7331) -> None:
         console.print("[red]fastapi and uvicorn are required: pip install fastapi uvicorn[/red]")
         raise SystemExit(1)
 
+    from fastapi import Response
     from flow.tracker import (
         init_db, get_api_spend_today, get_project_stats, get_recent_runs,
         load_active_run, get_window_usage,
     )
-    from flow.config import get_project_id, constraints, get_plan, get_plan_window_caps
+    from flow.config import DB_PATH, get_project_id, constraints, get_plan, get_plan_window_caps
 
     init_db()
     app = FastAPI(title="AI Flow", docs_url=None, redoc_url=None)
@@ -230,6 +238,16 @@ def cmd_serve(port: int = 7331) -> None:
     @app.get("/runs")
     async def runs(limit: int = 20, project: str = None):
         return JSONResponse(get_recent_runs(project, limit=limit))
+
+    @app.post("/stop")
+    async def stop_session():
+        project = get_project_id()
+        run = load_active_run(project)
+        if not run:
+            return Response(status_code=404)
+        sentinel = DB_PATH.parent / f"stop_{run.run_id}"
+        sentinel.touch()
+        return JSONResponse({"ok": True, "run_id": run.run_id})
 
     console.print(f"[bold cyan]AI Flow dashboard[/bold cyan] → http://localhost:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

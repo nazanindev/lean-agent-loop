@@ -76,7 +76,8 @@ def store_check_result(run: RunState, result_json: str) -> RunState:
         blockers = data.get("blocker_count", 0)
         add_decision(run, f"flow check: overall={overall}, blockers={blockers}")
     except Exception:
-        save_run(run)
+        pass
+    save_run(run)
     return run
 
 

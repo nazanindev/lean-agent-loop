@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from flow.config import constraints, get_project_id, get_branch, get_plan, get_plan_window_caps
+from flow.config import DB_PATH, constraints, get_project_id, get_branch, get_plan, get_plan_window_caps
 from flow.router import MODEL_ALIASES, model_for
 from flow.tracker import (
     Phase, RunStatus, init_db, load_active_run, save_run,
@@ -498,7 +498,7 @@ class AutopilotREPL:
         for i, r in enumerate(runs, 1):
             console.print(
                 f"  [cyan]{i}.[/cyan] [{r['run_id']}] {r['goal'][:60]}  "
-                f"[dim]{r['phase']} · ${r['cost_usd']:.4f}[/dim]"
+                f"[dim]{r['phase']} · ${r['cost_usd']:.4f} · {r.get('project', '?')} ({r.get('branch', '?')})[/dim]"
             )
 
         try:
@@ -545,6 +545,10 @@ class AutopilotREPL:
         notes = int(report.get("note_count", 0))
         summary = str(report.get("summary", "")).strip()
         self.last_check_summary = summary
+
+        if self.run:
+            import json as _json
+            store_check_result(self.run, _json.dumps(report))
 
         overall = report.get("overall", "?")
         console.print(
@@ -903,6 +907,7 @@ class AutopilotREPL:
 
         done_streams = set()
         start_ts = time.monotonic()
+        user_stopped = False
         while True:
             if len(done_streams) == 2 and proc.poll() is not None and q.empty():
                 break
@@ -919,6 +924,19 @@ class AutopilotREPL:
                 stream_name, line = q.get(timeout=0.2)
             except queue.Empty:
                 continue
+            except KeyboardInterrupt:
+                user_stopped = True
+                proc.kill()
+                console.print("[yellow]Session stopped by user (Ctrl+C)[/yellow]")
+                break
+
+            sentinel = DB_PATH.parent / f"stop_{self.run.run_id}"
+            if sentinel.exists():
+                sentinel.unlink(missing_ok=True)
+                user_stopped = True
+                proc.kill()
+                console.print("[yellow]Session stopped via dashboard[/yellow]")
+                break
 
             if line is None:
                 done_streams.add(stream_name)
@@ -964,6 +982,12 @@ class AutopilotREPL:
             # markup fragments like `[/yellow]` coming from model output.
             console.print(text, end="", markup=False, highlight=False)
             streamed_parts.append(text)
+
+        if user_stopped:
+            self.run.status = RunStatus.blocked
+            self.run.claude_session_id = ""
+            save_run(self.run)
+            return ""
 
         try:
             return_code = proc.wait(timeout=5)
