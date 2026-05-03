@@ -155,6 +155,15 @@ Three Claude Code hooks run for `flow` sessions via `~/.claude/settings.json`, p
 
 Hooks only fire when you launch Claude Code through `flow` — regular `claude` sessions are unaffected.
 
+### Hook health
+
+`flow init` writes hook commands as **`{sys.executable} -m flow.hooks.*`**, not bare `python3`, because on many machines `python3` on `PATH` is a different interpreter than the one that installed `flow` (e.g. Homebrew 3.14 vs Apple CLT 3.9). If the hook’s interpreter cannot `import flow`, Claude Code still runs tools: the hook process exits with `ModuleNotFoundError` and enforcement silently disappears — `/approve` never sees plan steps, `step:N/M` on the prompt stays flat, Agent spawn / edit gates / step metering do not run, and **Stop** may not record subscription usage for IDE sessions.
+
+- **`flow doctor`** — for each configured hook: checks `import flow` on the command’s interpreter and runs a small stdin smoke test (`PreToolUse` with `AP_ACTIVE=1`, etc.).
+- **`flow doctor --fix`** — same as **`flow init --force`**: rewrite `~/.claude/settings.json` with this install’s `sys.executable`.
+- **Auto-repair on `flow init`** — if hooks already exist but their interpreter fails `import flow`, `flow init` (without `--force`) still rewrites hooks so a broken install self-heals on the next init.
+- **`flow verify`** and the **REPL startup banner** print a one-line hook health summary when something is wrong.
+
 ### Known limitations
 
 Hook-based enforcement is the current mechanism but it has real fragility:

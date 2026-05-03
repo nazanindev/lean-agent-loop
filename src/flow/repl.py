@@ -648,10 +648,20 @@ class AutopilotREPL:
                 f"[bold]Cost:[/bold] ${self.run.cost_usd:.4f}"
             )
 
+    def _print_hook_misconfig_banner(self, message: str) -> None:
+        console.print(Panel(
+            f"{message}\n\n"
+            "Until hooks work, Claude Code will not persist plans (`/approve` stays empty), "
+            "the step counter will not advance, and spawn / quota gates are disabled.\n\n"
+            "Run [bold]flow doctor --fix[/bold] or [bold]flow init --force[/bold], then restart the REPL.",
+            title="[bold red]Hook configuration[/bold red]",
+            border_style="red",
+        ))
+
     def _show_help(self) -> None:
         console.print(Panel(
             "[bold]Shell-style CLI (inside this REPL):[/bold]\n"
-            "  `flow status` · `flow verify` · `flow features list` — same as in a terminal.\n"
+            "  `flow status` · `flow verify` · `flow doctor` · `flow features list` — same as in a terminal.\n"
             "  [dim]Bare `flow` is blocked here (would nest another REPL).[/dim]\n\n"
             "[bold]Slash shortcuts:[/bold]\n"
             "  /status · /verify · /ship — same as `flow status`, etc.\n\n"
@@ -1093,6 +1103,11 @@ class AutopilotREPL:
 
         # Restore active run for this project
         self.run = load_active_run(self.project)
+
+        from flow.commands.doctor import hook_health_ok, hook_health_one_liner
+
+        if not hook_health_ok():
+            self._print_hook_misconfig_banner(hook_health_one_liner())
 
         console.print(Panel(
             f"[bold cyan]AI Flow[/bold cyan] — {self.project} ({self.branch})\n"
