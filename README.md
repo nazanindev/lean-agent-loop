@@ -37,48 +37,65 @@ Three properties enforced by the harness, not the model:
 
 The **host** owns state and policy; the **worker** is one headless Claude Code turn under hooks; **utilities** are invoked by `flow` outside that subprocess.
 
+### Scaling plan
+
+**Today** is one serial worker per run (Planned: [ENGINEERING.md](docs/ENGINEERING.md#map-reduce-scaling-path)).
+
+#### Today
+
+Read as **columns**: orchestrator (vertical stack) → worker → utilities. Hooks read policy and write usage into DuckDB — omitted as edges so lines do not cut back through the box.
+
 ```mermaid
-flowchart TB
-  subgraph orch["Orchestrator — flow REPL / CLI"]
-    R["Phases, briefing, RunState I/O"]
-    DB[("DuckDB — RunState")]
-    R <--> DB
+flowchart LR
+  %% --- Orchestrator ---
+  subgraph orchestrator["Orchestrator"]
+    direction TB
+    policy["Policy (YAML)"]
+    repl["flow REPL"]
+    state[("Run State (DuckDB)")]
+
+    policy --> repl
+    repl <--> state
   end
 
-  subgraph worker["Worker — Claude Code subprocess"]
-    CC["Headless session (tools)"]
-    HK["Hooks: PreToolUse · Stop · PreCompact"]
-    CC --- HK
+  %% --- Worker ---
+  worker["Claude Code (with hooks)"]
+
+  %% --- Utilities ---
+  subgraph utilities["Utilities"]
+    direction TB
+    util["verify / check / ship"]
+    git["Git / GitHub"]
+
+    util --> git
   end
 
-  subgraph worker2["Worker — e.g. GPT-4o · 🚧 planned"]
-    CC2["Headless session"]
-    HK2["Same hook interface"]
-    CC2 --- HK2
-  end
-
-  CY["constraints.yaml"] --> HK
-  CY -.-> HK2
-
-  subgraph util["Utilities — flow CLI entrypoints"]
-    V["flow verify"]
-    CH["flow check"]
-    SH["flow ship / ci-review"]
-  end
-
-  GIT["git / gh / PR / CI"]
-
-  R --> CC
-  R -.-> CC2
-  R --> V
-  R --> CH
-  R --> SH
-  SH --> GIT
+  %% --- Data / Control Flow ---
+  repl -->|serial execution| worker
+  policy -.->|hook injection| worker
+  repl --> utilities
 ```
 
-> Dashed lines indicate planned capability — the orchestrator is designed to be model-agnostic; Claude Code is the first supported worker.
->
-> **Note on enforcement:** current constraints are implemented via Claude Code hooks, which are Claude Code-specific and bypassable outside `flow`. The direction is API-forward enforcement that generalizes across workers. See [ENGINEERING.md](ENGINEERING.md#known-limitations).
+#### Target (map reduce)
+
+```mermaid
+flowchart LR
+  subgraph orchTarget [Orchestrator]
+    logic["Business logic"]
+    mapStep["Map"]
+    state[("RunState")]
+    reduceStep["Reduce"]
+    logic --> mapStep
+    mapStep --> state
+    reduceStep --> state
+  end
+  pool["N workers"]
+  tooling["Tools"]
+
+  mapStep --> pool
+  pool --> reduceStep
+  reduceStep --> tooling
+```
 
 State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected — not a transcript. Context stays cheap, runs are resumable, and cost is attributable per run.
 
@@ -219,4 +236,4 @@ Override at any time with `/model` or by editing `routing.yaml`.
 
 ---
 
-For engineering principles, constraint details, observability design, billing surfaces, and the style system, see [ENGINEERING.md](ENGINEERING.md).
+For engineering principles, constraint details, observability design, billing surfaces, and the style system, see [ENGINEERING.md](docs/ENGINEERING.md).
