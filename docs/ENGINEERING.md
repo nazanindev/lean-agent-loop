@@ -16,7 +16,7 @@ Deep-dive on harness design, tradeoffs, and internals. See [README.md](README.md
 
 **Completion tied to checks.** `flow verify` plus Stop-hook clean-state rules (verify/ship phases) bind "done" to test exit status and working-tree hygiene.
 
-**Two cost surfaces.** Claude Code: subscription quota. `flow` utilities (`ship`, `ci-review`, `check`, …): API-metered USD. Tracked separately.
+**Two cost surfaces.** Subscription quota (Claude Code) vs API-metered utilities — [billing](#two-billing-surfaces).
 
 **Explicit human approvals.** Plan (`/approve`, `/reject`), PR (`/gate pr`), optional checker acknowledgement before ship when policy requires it.
 
@@ -34,10 +34,39 @@ Deep-dive on harness design, tradeoffs, and internals. See [README.md](README.md
 
 Work in progress on the orchestration layer:
 
-- **Multi-agent / multi-session coordination** — first-class scheduling, isolation, and budgets when more than one worker session participates in the same run (parallel workers, shared `RunState`, clearer handoffs).
-- **Git worktrees** — run tasks in disposable trees with explicit linkage from `RunState` / verify / check to the correct checkout, so parallel streams do not fight the default working tree.
+- **Parallel orchestration** — scheduling, isolation, budgets: [multi-role swarms vs multi-run worktrees](#two-scaling-modes); disposable checkouts with `RunState` / verify / check / ship bound to the right path.
 - **Auto-remediation loops** — when `flow check` or `flow verify` finds blockers, spawn a bounded fix worker, re-verify, and only proceed to ship on a clean pass. Currently a manual cycle (`/check` → fix → `/verify` → `/ship`); the phase machine is already structured for this to be automatic.
 - **Crash-investigation agent** — on startup failure or uncaught exception, capture the traceback, inject it as the run briefing, and spawn a diagnostic worker turn to investigate. The structured briefing format is already built for this kind of context injection; it just needs a trigger path from the exception handler.
+
+---
+
+## Map-reduce scaling path
+
+The README **Scaling plan** has two figures: **Today** (serial Claude Code + hooks + utilities) and **Target** below. **Target** is the abstraction: **map** assigns bounded units to workers under a stable contract (briefing in, artifacts and markers out); **reduce** is the host merging into `RunState`, gates, and **tools** (`verify`, `check`, `ship`, `gh`) — not the model. **Business logic** (constraints, routing, features, phase gates) is **part of the orchestrator** — config on disk, evaluation and scheduling in the REPL — not a separate runtime from map/reduce.
+
+### Two scaling modes
+
+Parallel **N** means different things in each shape:
+
+**Multi-role, one task (swarm / queue).** Several *roles* on *one* run (research, build, review) with handoffs over a **host-owned** queue or artifact channel. Reduce keeps **one** `RunState`, ordering, and liveness. Needs a parseable handoff contract and ideally **one mutating writer** on the tree (or explicit merge rules).
+
+**Many runs, many trees (throughput).** Several *tasks* at once, each with its own checkout (worktrees / clones). **N** = **N runs**, each with its own reduce and `RunState` → checkout linkage for tools. Isolation is **per-run filesystem** — orthogonal to the swarm mailbox.
+
+### Workers
+
+Model-agnostic in principle. **Today:** Claude Code + hooks ([limitations](#known-limitations)); other backends need their own enforcement or host-side API checkpoints.
+
+### What must harden as N grows
+
+- **Scheduling** — parallel vs sequence, budgets, attribution across workers or runs ([Two scaling modes](#two-scaling-modes)).
+- **Isolation** — throughput mode: checkout per run so mappers do not share one working tree.
+- **Reduce semantics** — ordering, conflicts, single owner for `git` before ship (swarm mode especially).
+- **Enforcement parity** — hooks are Claude-specific; see [Known limitations](#known-limitations).
+- **Observability** — per-worker / per-unit signals; extends [Observability gaps](#observability).
+
+### Current baseline
+
+**N = 1**, serial turns: one worker role, one run, DuckDB `RunState`, host utilities — matches the README **Today** figure. The **Target** figure is **direction**, not full parallel product yet.
 
 ---
 
@@ -156,7 +185,7 @@ Tightening the orchestrator requires **closing the loop on worker behavior**: ho
 
 **Gaps (direction, not yet first-class)**
 
-Per-tool traces inside a Claude Code turn (each Bash / Write with outcome and latency), structured hook denials as first-class spans, and richer joins from prompting + policy version → tool graph are the next layer. Today's telemetry is the baseline; expect more granular worker-side events as multi-session orchestration hardens.
+Per-tool traces inside a Claude Code turn (each Bash / Write with outcome and latency), structured hook denials as first-class spans, and richer joins from prompting + policy version → tool graph are the next layer. Baseline today; granularity rises as [N grows](#map-reduce-scaling-path).
 
 ---
 

@@ -2,9 +2,10 @@
 
 **Cost-aware, model-agnostic CLI orchestrator for bounded LLM development workflows.**
 
-`flow` wraps any LLM coding agent as a supervised worker: it owns phase transitions, persisted `RunState`, hook-enforced spend and step limits, and the utility calls (verify, check, ship, review) that sit outside the model session. The model is a worker inside that loop — not the whole system. Claude Code is the first supported worker.
+`flow` wraps any LLM coding agent as a supervised worker: it owns phase transitions, persisted `RunState`, hook-enforced spend and step limits, and the utility calls (verify, check, ship, review) that sit outside the model session. The model is a worker inside that loop — not the whole system. Claude Code is the first worker; others can be plugged in.
 
-Happy path: prompt → patch → PR → review → merge.
+**Happy path:**  
+`prompt → patch → PR → review → merge`
 
 ---
 
@@ -12,12 +13,10 @@ Happy path: prompt → patch → PR → review → merge.
 
 Running LLM coding sessions without a harness means:
 
-- **No cost visibility** — token usage and API spend are opaque until the bill arrives
-- **No model discipline** — every task defaults to the same (expensive) model regardless of complexity
-- **No bounds** — subagent spawning, context bloat, and runaway sessions go unchecked
-- **No workflow** — shipping, reviewing, and PR creation are manual steps bolted on after the fact
-
-`flow` enforces all three properties at the host level — cost tracking, model routing by phase, and hard step/spend gates — so the model can't opt out of them.
+- **No cost visibility** — API spend is opaque
+- **No model discipline** — tasks default to expensive models
+- **No bounds** — subagent spawning + context bloat + runaway sessions
+- **No workflow** — PR/review/ship are manual
 
 ---
 
@@ -35,54 +34,76 @@ Three properties enforced by the harness, not the model:
 | **Model-agnostic** | Any LLM worker can be plugged in — the orchestrator's phases, briefings, and constraints are model-independent; Claude Code is the current worker, others are planned |
 | **Bounded** | Weighted step budgets per phase, bash allowlist, subagent spawn gate, context compression on `/new` |
 
-The **host** owns state and policy; the **worker** is one headless Claude Code turn under hooks; **utilities** are invoked by `flow` outside that subprocess.
+The **host** owns state and policy; the **worker** is one headless Claude Code turn under hooks; utilities run outside the model process and cannot be bypassed.
+
+State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected so context stays cheap, runs are resumable, and cost is attributable per run.
+
+Phases: `plan → execute → verify → ship`. Each phase enforces its own step budget and selects the appropriate model (currently Opus / Sonnet / Haiku within Claude). The briefing format and constraint layer are model-independent.
+
+### Scaling
+
+**Today:** One serial worker per run.
 
 ```mermaid
-flowchart TB
-  subgraph orch["Orchestrator — flow REPL / CLI"]
-    R["Phases, briefing, RunState I/O"]
-    DB[("DuckDB — RunState")]
-    R <--> DB
+flowchart LR
+  %% --- Orchestrator ---
+  subgraph orchestrator["Orchestrator"]
+    direction TB
+    policy["Policy (YAML)"]
+    repl["flow REPL"]
+    state[("Run State (DuckDB)")]
+
+    policy --> repl
+    repl <--> state
   end
 
-  subgraph worker["Worker — Claude Code subprocess"]
-    CC["Headless session (tools)"]
-    HK["Hooks: PreToolUse · Stop · PreCompact"]
-    CC --- HK
+  %% --- Worker ---
+  worker["Claude Code (with hooks)"]
+
+  %% --- Utilities ---
+  subgraph utilities["Utilities"]
+    direction TB
+    util["verify / check / ship"]
+    git["Git / GitHub"]
+
+    util --> git
   end
 
-  subgraph worker2["Worker — e.g. GPT-4o · 🚧 planned"]
-    CC2["Headless session"]
-    HK2["Same hook interface"]
-    CC2 --- HK2
-  end
-
-  CY["constraints.yaml"] --> HK
-  CY -.-> HK2
-
-  subgraph util["Utilities — flow CLI entrypoints"]
-    V["flow verify"]
-    CH["flow check"]
-    SH["flow ship / ci-review"]
-  end
-
-  GIT["git / gh / PR / CI"]
-
-  R --> CC
-  R -.-> CC2
-  R --> V
-  R --> CH
-  R --> SH
-  SH --> GIT
+  %% --- Data / Control Flow ---
+  repl -->|serial execution| worker
+  policy -.->|hook injection| worker
+  repl --> utilities
 ```
 
-> Dashed lines indicate planned capability — the orchestrator is designed to be model-agnostic; Claude Code is the first supported worker.
->
-> **Note on enforcement:** current constraints are implemented via Claude Code hooks, which are Claude Code-specific and bypassable outside `flow`. The direction is API-forward enforcement that generalizes across workers. See [ENGINEERING.md](ENGINEERING.md#known-limitations).
+**Target:** Parallel workers; 2 scaling modes. ([Map/reduce design](docs/ENGINEERING.md#map-reduce-scaling-path))
 
-State lives in an explicit **RunState machine** backed by DuckDB, not Claude's chat history. Every session gets a structured briefing injected — not a transcript. Context stays cheap, runs are resumable, and cost is attributable per run.
+```mermaid
+flowchart LR
+  subgraph orchTarget["Orchestrator"]
+    direction TB
+    logic["Business logic"]
+    mapStep["Map"]
+    state[("RunState")]
+    reduceStep["Reduce"]
 
-Phases: `plan → execute → verify → ship`. Each phase enforces its own step budget and selects the appropriate model (currently Opus / Sonnet / Haiku within Claude). The briefing format and constraint layer are model-independent — swapping the worker doesn't require changing how the orchestrator runs.
+    logic --> mapStep
+    mapStep --> state
+    reduceStep --> state
+  end
+
+  subgraph workers["Worker Pool"]
+    direction TB
+    w1["Worker 1"]
+    w2["Worker 2"]
+    wN["Worker N"]
+  end
+
+  tooling["Tools"]
+
+  mapStep --> workers
+  workers --> reduceStep
+  reduceStep --> tooling
+```
 
 ---
 
@@ -219,4 +240,4 @@ Override at any time with `/model` or by editing `routing.yaml`.
 
 ---
 
-For engineering principles, constraint details, observability design, billing surfaces, and the style system, see [ENGINEERING.md](ENGINEERING.md).
+For engineering principles, constraint details, observability design, billing surfaces, and the style system, see [ENGINEERING.md](docs/ENGINEERING.md).
