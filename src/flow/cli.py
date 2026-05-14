@@ -1,4 +1,7 @@
 """CLI entry point — `flow` command."""
+import warnings
+warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*", category=UserWarning)
+
 import typer
 from typing import Optional
 

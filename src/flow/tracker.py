@@ -1,6 +1,8 @@
 """DuckDB-backed store for RunState, sessions, and subagent events."""
 import json
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
@@ -10,6 +12,20 @@ from typing import Optional
 import duckdb
 
 from flow.config import DB_PATH
+
+# DuckDB allows only one read-write connection at a time per file.
+# All DB access goes through this lock so threads don't race.
+_db_lock = threading.Lock()
+
+
+@contextmanager
+def _conn():
+    with _db_lock:
+        con = duckdb.connect(str(DB_PATH))
+        try:
+            yield con
+        finally:
+            con.close()
 
 
 class Phase(str, Enum):
@@ -60,8 +76,6 @@ class RunState:
     last_check_result: str = ""
 
 
-def _conn() -> duckdb.DuckDBPyConnection:
-    return duckdb.connect(str(DB_PATH))
 
 
 def _window_start_for(dt: datetime) -> str:

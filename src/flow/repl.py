@@ -76,13 +76,18 @@ class AgentSession:
     project: str
     branch: str
     cwd: Path
+    session_type: str = "executor"    # "executor" | "planner" | "reviewer"
+    model_override: Optional[str] = None
+    auto_ship: bool = True            # False skips the ship step (used by test sessions)
     thread: Optional[threading.Thread] = None
     output_queue: queue.Queue = field(default_factory=queue.Queue)
     output_history: List[str] = field(default_factory=list)
+    inject_queue: queue.Queue = field(default_factory=queue.Queue)
     lock: threading.Lock = field(default_factory=threading.Lock)
     status: str = "running"           # "running" | "done" | "failed"
     last_line: str = ""
     pr_url: str = ""
+    started_at: float = field(default_factory=time.monotonic)
 
 
 class FlowOrchestrator:
@@ -95,6 +100,8 @@ class FlowOrchestrator:
         c = constraints()
         self.auto_remediate = bool(c.get("auto_remediate", True))
         self.auto_remediate_max_tries = int(c.get("auto_remediate_max_tries", 2))
+        self._api_spend_cache: float = 0.0
+        self._api_spend_last_refresh: float = 0.0
         self.auto_verify = bool(c.get("auto_verify_on_steps_complete", True))
         self.auto_check = bool(c.get("auto_check_before_ship", True))
         self.prompt_session = PromptSession(
@@ -163,16 +170,35 @@ class FlowOrchestrator:
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
     def _start_session(self, goal: str) -> AgentSession:
-        cwd, branch = self._create_worktree(goal)
+        # Parse session type from prefix: "plan: ..." | "review: ..." | default executor
+        session_type = "executor"
+        model_override = None
+        display_goal = goal
+
+        lower = goal.lower()
+        if lower.startswith("plan:"):
+            session_type = "planner"
+            display_goal = goal[5:].strip()
+            model_override = "claude-opus-4-7"
+        elif lower.startswith("review:"):
+            session_type = "reviewer"
+            display_goal = goal[7:].strip()
+            model_override = "claude-haiku-4-5-20251001"
+
+        cwd, branch = self._create_worktree(display_goal)
 
         init_db()
-        run = RunState(goal=goal, project=self.project, branch=branch)
+        run = RunState(goal=display_goal, project=self.project, branch=branch)
         save_run(run)
-        trace_run_started(run.run_id, run.project, run.branch, goal)
+        trace_run_started(run.run_id, run.project, run.branch, display_goal)
 
         idx = len(self.sessions) + 1
-        session = AgentSession(idx=idx, goal=goal, run=run,
-                               project=self.project, branch=branch, cwd=cwd)
+        session = AgentSession(
+            idx=idx, goal=display_goal, run=run,
+            project=self.project, branch=branch, cwd=cwd,
+            session_type=session_type,
+            model_override=model_override or self.model_override,
+        )
         session.thread = threading.Thread(
             target=self._session_worker, args=(session,), daemon=True,
         )
@@ -182,10 +208,12 @@ class FlowOrchestrator:
 
     def _session_worker(self, session: AgentSession) -> None:
         try:
-            self._run_turn(session.goal, session)
-            with session.lock:
-                if session.status == "running":
-                    session.status = "done"
+            if session.session_type == "planner":
+                self._planner_worker(session)
+            elif session.session_type == "reviewer":
+                self._reviewer_worker(session)
+            else:
+                self._executor_worker(session)
         except SystemExit:
             with session.lock:
                 if session.status == "running":
@@ -194,6 +222,93 @@ class FlowOrchestrator:
             with session.lock:
                 session.status = "failed"
                 session.last_line = str(e)[:100]
+
+    def _executor_worker(self, session: AgentSession) -> None:
+        """Standard pipeline: plan → execute → verify → fix → ship."""
+        self._run_turn(session.goal, session)
+        # Drain any messages injected while this turn was running
+        self._drain_inject(session)
+        with session.lock:
+            if session.status == "running":
+                session.status = "done"
+
+    def _planner_worker(self, session: AgentSession) -> None:
+        """Interactive planning session: runs forever, responds to /prompt N."""
+        self._run_turn(session.goal, session)
+        self._session_push(session, "\n[planner] Waiting — use /prompt to continue\n")
+        while True:
+            with session.lock:
+                if session.status != "running":
+                    return
+            try:
+                msg = session.inject_queue.get(timeout=0.5)
+                self._session_push(session, f"\n→ [prompt] {msg}\n")
+                self._run_turn(msg, session)
+                self._session_push(session, "\n[planner] Waiting — use /prompt to continue\n")
+            except queue.Empty:
+                continue
+
+    def _reviewer_worker(self, session: AgentSession) -> None:
+        """One-shot AI code review of a branch or HEAD."""
+        target = session.goal.strip() or "HEAD"
+        self._session_push(session, f"→ Reviewing {target}...\n")
+
+        # Try branch diff first, fall back to HEAD diff
+        for diff_args in (["diff", f"main...{target}"], ["diff", target], ["diff", "HEAD"]):
+            r = subprocess.run(
+                ["git"] + diff_args,
+                capture_output=True, text=True, cwd=str(session.cwd),
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                diff = r.stdout
+                break
+        else:
+            diff = ""
+
+        if not diff.strip():
+            self._session_push(session, "No diff found — nothing to review.\n")
+            with session.lock:
+                session.status = "done"
+            return
+
+        try:
+            from flow.commands.check import run_check
+            report = run_check(diff_text=diff)
+            overall = report.get("overall", "?")
+            blockers = report.get("blocker_count", 0)
+            warnings_ = report.get("warning_count", 0)
+            self._session_push(
+                session,
+                f"Overall: {overall} | Blockers: {blockers} | Warnings: {warnings_}\n"
+                f"{report.get('summary', '')}\n",
+            )
+            for f in report.get("findings", []):
+                loc = f.get("file", "") or "unknown"
+                if f.get("line"):
+                    loc = f"{loc}:{f['line']}"
+                self._session_push(
+                    session,
+                    f"  [{f['severity']}] {f['title']} — {loc}\n"
+                    f"    {f.get('detail', '')}\n"
+                    f"    → {f.get('action', '')}\n",
+                )
+            with session.lock:
+                session.last_line = f"{overall} | {blockers}B {warnings_}W"
+        except Exception as e:
+            self._session_push(session, f"Review failed: {e}\n")
+
+        with session.lock:
+            session.status = "done"
+
+    def _drain_inject(self, session: AgentSession) -> None:
+        """Process any queued /prompt messages after the current turn."""
+        while True:
+            try:
+                msg = session.inject_queue.get_nowait()
+                self._session_push(session, f"\n→ [prompt injected] {msg}\n")
+                self._run_turn(msg, session)
+            except queue.Empty:
+                break
 
     # ── Plan helpers ──────────────────────────────────────────────────────────
 
@@ -337,6 +452,13 @@ class FlowOrchestrator:
             except Exception as e:
                 self._session_push(session, f"Code review skipped: {e}\n")
 
+        if not session.auto_ship:
+            elapsed = time.monotonic() - session.started_at
+            self._session_push(session, f"✓ Test complete in {elapsed:.0f}s — ship skipped\n")
+            with session.lock:
+                session.last_line = f"✓ passed in {elapsed:.0f}s"
+            return
+
         self._session_push(session, "→ Shipping...\n")
         ship_env = {**os.environ, "AP_ACTIVE": "0"}
         ship_result = subprocess.run(
@@ -401,7 +523,7 @@ class FlowOrchestrator:
     # ── Claude subprocess ─────────────────────────────────────────────────────
 
     def _launch_claude(self, task: str, session: AgentSession) -> str:
-        model = self.model_override or model_for(session.run.phase, session.run.goal)
+        model = session.model_override or self.model_override or model_for(session.run.phase, session.run.goal)
         briefing = get_session_briefing(session.run)
         directive = phase_directive(session.run)
 
@@ -610,7 +732,16 @@ class FlowOrchestrator:
     # ── Live table display ────────────────────────────────────────────────────
 
     def _render_table(self) -> Table:
-        api_today = get_api_spend_today(self.project)
+        # Refresh api spend at most once every 5s to avoid DB on every 4Hz tick
+        now = time.monotonic()
+        if now - self._api_spend_last_refresh > 5.0:
+            try:
+                self._api_spend_cache = get_api_spend_today(self.project)
+            except Exception:
+                pass
+            self._api_spend_last_refresh = now
+        api_today = self._api_spend_cache
+
         running = sum(1 for s in self.sessions if s.status == "running")
 
         table = Table(
@@ -619,6 +750,7 @@ class FlowOrchestrator:
             border_style="dim", expand=True,
         )
         table.add_column("#", width=3, justify="right")
+        table.add_column("Type", width=8)
         table.add_column("Task", ratio=3)
         table.add_column("Phase", width=8)
         table.add_column("Steps", width=6)
@@ -626,16 +758,17 @@ class FlowOrchestrator:
         table.add_column("Last output", ratio=4)
 
         for session in self.sessions:
-            fresh = load_run(session.run.run_id) or session.run
-            phase = fresh.phase.value if fresh else "?"
+            # Read directly from session.run — worker thread updates it after each turn
+            run = session.run
+            phase = run.phase.value if run else "?"
 
             steps_str = ""
-            if fresh and fresh.plan_steps:
-                done = sum(1 for s in fresh.plan_steps if s.get("status") == "done")
-                total = len(fresh.plan_steps)
+            if run and run.plan_steps:
+                done = sum(1 for s in run.plan_steps if s.get("status") == "done")
+                total = len(run.plan_steps)
                 steps_str = f"{done}/{total}" if session.status == "running" else "✓"
 
-            cost_str = f"${fresh.cost_usd:.2f}" if fresh else "$0.00"
+            cost_str = f"${run.cost_usd:.2f}" if run else "$0.00"
 
             with session.lock:
                 status = session.status
@@ -652,17 +785,22 @@ class FlowOrchestrator:
                 status_str = phase
                 display_last = last
 
+            type_colors = {"planner": "magenta", "reviewer": "yellow", "executor": "cyan"}
+            color = type_colors.get(session.session_type, "cyan")
+            type_str = f"[{color}]{session.session_type[:4]}[/{color}]"
+
             table.add_row(
                 str(session.idx),
-                session.goal[:55],
+                type_str,
+                session.goal[:50],
                 status_str,
                 steps_str,
                 cost_str,
-                display_last[:80],
+                display_last[:75],
             )
 
         if not self.sessions:
-            table.add_row("", "[dim]No sessions yet — type a task to start[/dim]", "", "", "", "")
+            table.add_row("", "", "[dim]No sessions yet — type a task to start[/dim]", "", "", "", "")
 
         return table
 
@@ -738,6 +876,10 @@ class FlowOrchestrator:
             self._show_status()
         elif verb == "/sessions":
             self._show_sessions()
+        elif verb == "/prompt":
+            self._inject_prompt(arg)
+        elif verb == "/test-flow":
+            self._start_test_session()
         elif verb == "/view":
             if not arg.isdigit():
                 console.print("[red]Usage: /view N[/red]")
@@ -779,6 +921,27 @@ class FlowOrchestrator:
             sentinel = DB_PATH.parent / f"stop_{s.run.run_id}"
             sentinel.touch()
             console.print(f"[yellow]→ Stop signal sent to session {s.idx}[/yellow]")
+
+    def _inject_prompt(self, arg: str) -> None:
+        parts = arg.split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            console.print("[red]Usage: /prompt N <message>[/red]")
+            return
+        idx = int(parts[0])
+        msg = parts[1].strip()
+        if not msg:
+            console.print("[red]Message cannot be empty.[/red]")
+            return
+        if idx < 1 or idx > len(self.sessions):
+            console.print(f"[red]No session {idx}[/red]")
+            return
+        session = self.sessions[idx - 1]
+        with session.lock:
+            if session.status != "running":
+                console.print(f"[yellow]Session {idx} is not running.[/yellow]")
+                return
+        session.inject_queue.put(msg)
+        console.print(f"[dim]→ Message queued for session {idx} ({session.session_type})[/dim]")
 
     def _resume(self, run_id: str) -> None:
         from flow.tracker import get_recent_runs
@@ -855,21 +1018,87 @@ class FlowOrchestrator:
 
     def _show_help(self) -> None:
         console.print(Panel(
+            "[bold]Session types (prefix your task):[/bold]\n"
+            "  <task>            executor — full pipeline: plan → execute → verify → ship\n"
+            "  plan: <question>  planner — interactive, stays alive, responds to /prompt (opus)\n"
+            "  review: <branch>  reviewer — one-shot AI code review of a branch (haiku)\n\n"
             "[bold]Commands:[/bold]\n"
-            "  /view N           drill into session N (read-only output)\n"
-            "  /sessions         list all sessions\n"
+            "  /test-flow        run a micro smoke test (plan→execute→verify, no ship)\n"
+            "  /prompt N <msg>   inject a message into session N\n"
+            "  /view N           drill into session N — full output + live tail\n"
+            "  /sessions         list all sessions with status\n"
             "  /status           cost, quota, all sessions\n"
-            "  /model <name>     force model (opus / sonnet / haiku)\n"
+            "  /model <name>     force model for new sessions (opus / sonnet / haiku)\n"
             "  /no-agents        toggle subagent spawning\n"
             "  /budget $X        set API spend cap\n"
             "  /stop [N]         stop session N (or all running)\n"
             "  /resume [id]      attach to an interrupted run\n"
-            "  /quit             exit\n\n"
-            "[bold]Pipeline:[/bold]\n"
-            "  prompt → plan → execute → verify → fix loop → PR\n"
-            "  Each task runs in its own git worktree + branch.",
+            "  /quit             exit (cleans up completed worktrees)",
             title="AI Flow", border_style="dim",
         ))
+
+    def _start_test_session(self) -> AgentSession:
+        """Start a fixed micro-task that exercises plan→execute→verify without shipping."""
+        task = (
+            "Create exactly two files and nothing else:\n\n"
+            "1. `src/flow/ping.py` containing:\n"
+            "```python\n"
+            "def flow_ping() -> str:\n"
+            "    return 'pong'\n"
+            "```\n\n"
+            "2. `tests/test_ping.py` containing:\n"
+            "```python\n"
+            "from flow.ping import flow_ping\n\n"
+            "def test_ping():\n"
+            "    assert flow_ping() == 'pong'\n"
+            "```\n\n"
+            "Do not modify any other files. Do not add imports or docstrings. "
+            "These two files are the complete deliverable."
+        )
+        cwd, branch = self._create_worktree("test-flow-ping")
+        init_db()
+        run = RunState(goal="[test] add flow_ping smoke test", project=self.project, branch=branch)
+        save_run(run)
+        trace_run_started(run.run_id, run.project, run.branch, run.goal)
+
+        idx = len(self.sessions) + 1
+        session = AgentSession(
+            idx=idx,
+            goal="[test] flow_ping smoke test",
+            run=run,
+            project=self.project,
+            branch=branch,
+            cwd=cwd,
+            session_type="executor",
+            auto_ship=False,
+        )
+        session._test_task = task  # store the real task text
+        session.thread = threading.Thread(
+            target=self._test_session_worker, args=(session,), daemon=True,
+        )
+        self.sessions.append(session)
+        session.thread.start()
+        console.print(
+            f"[dim]→ Test session {idx} started — plan+execute+verify, no ship[/dim]"
+        )
+        return session
+
+    def _test_session_worker(self, session: AgentSession) -> None:
+        try:
+            task = getattr(session, "_test_task", session.goal)
+            self._run_turn(task, session)
+            self._drain_inject(session)
+            with session.lock:
+                if session.status == "running":
+                    session.status = "done"
+        except SystemExit:
+            with session.lock:
+                if session.status == "running":
+                    session.status = "done"
+        except Exception as e:
+            with session.lock:
+                session.status = "failed"
+                session.last_line = str(e)[:100]
 
     def _on_quit(self) -> None:
         done = [s for s in self.sessions if s.status in ("done", "failed")]
