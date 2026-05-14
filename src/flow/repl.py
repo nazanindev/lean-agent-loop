@@ -100,6 +100,8 @@ class FlowOrchestrator:
         c = constraints()
         self.auto_remediate = bool(c.get("auto_remediate", True))
         self.auto_remediate_max_tries = int(c.get("auto_remediate_max_tries", 2))
+        self._api_spend_cache: float = 0.0
+        self._api_spend_last_refresh: float = 0.0
         self.auto_verify = bool(c.get("auto_verify_on_steps_complete", True))
         self.auto_check = bool(c.get("auto_check_before_ship", True))
         self.prompt_session = PromptSession(
@@ -730,7 +732,16 @@ class FlowOrchestrator:
     # ── Live table display ────────────────────────────────────────────────────
 
     def _render_table(self) -> Table:
-        api_today = get_api_spend_today(self.project)
+        # Refresh api spend at most once every 5s to avoid DB on every 4Hz tick
+        now = time.monotonic()
+        if now - self._api_spend_last_refresh > 5.0:
+            try:
+                self._api_spend_cache = get_api_spend_today(self.project)
+            except Exception:
+                pass
+            self._api_spend_last_refresh = now
+        api_today = self._api_spend_cache
+
         running = sum(1 for s in self.sessions if s.status == "running")
 
         table = Table(
@@ -747,16 +758,17 @@ class FlowOrchestrator:
         table.add_column("Last output", ratio=4)
 
         for session in self.sessions:
-            fresh = load_run(session.run.run_id) or session.run
-            phase = fresh.phase.value if fresh else "?"
+            # Read directly from session.run — worker thread updates it after each turn
+            run = session.run
+            phase = run.phase.value if run else "?"
 
             steps_str = ""
-            if fresh and fresh.plan_steps:
-                done = sum(1 for s in fresh.plan_steps if s.get("status") == "done")
-                total = len(fresh.plan_steps)
+            if run and run.plan_steps:
+                done = sum(1 for s in run.plan_steps if s.get("status") == "done")
+                total = len(run.plan_steps)
                 steps_str = f"{done}/{total}" if session.status == "running" else "✓"
 
-            cost_str = f"${fresh.cost_usd:.2f}" if fresh else "$0.00"
+            cost_str = f"${run.cost_usd:.2f}" if run else "$0.00"
 
             with session.lock:
                 status = session.status
