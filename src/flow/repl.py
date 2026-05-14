@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -22,11 +23,11 @@ from typing import Any, Dict, List, Optional
 warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*", category=UserWarning)
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
@@ -106,7 +107,11 @@ class FlowOrchestrator:
         self.auto_check = bool(c.get("auto_check_before_ship", True))
         self.prompt_session = PromptSession(
             history=FileHistory(str(HISTORY_PATH)),
-            style=Style.from_dict({"prompt": "bold cyan"}),
+            style=Style.from_dict({
+                "prompt": "bold cyan",
+                # Transparent bg, dim fg — inherits the terminal's own theme
+                "bottom-toolbar": "bg:default fg:ansibrightblack",
+            }),
         )
 
     # ── Git worktree ──────────────────────────────────────────────────────────
@@ -185,7 +190,12 @@ class FlowOrchestrator:
             display_goal = goal[7:].strip()
             model_override = "claude-haiku-4-5-20251001"
 
-        cwd, branch = self._create_worktree(display_goal)
+        # Reviewer sessions don't need an isolated worktree — they only read git history
+        if session_type == "reviewer":
+            cwd = self._git_root()
+            branch = self.branch
+        else:
+            cwd, branch = self._create_worktree(display_goal)
 
         init_db()
         run = RunState(goal=display_goal, project=self.project, branch=branch)
@@ -475,6 +485,32 @@ class FlowOrchestrator:
             with session.lock:
                 session.pr_url = pr_match.group(0)
                 session.last_line = f"PR: {session.pr_url}"
+            self._spawn_reviewer(session.branch, pr_url=session.pr_url)
+
+    def _spawn_reviewer(self, branch: str, pr_url: str = "") -> AgentSession:
+        """Auto-spawn a reviewer session after a branch ships."""
+        git_root = self._git_root()
+        init_db()
+        goal = branch
+        run = RunState(goal=goal, project=self.project, branch=self.branch)
+        save_run(run)
+        trace_run_started(run.run_id, run.project, run.branch, goal)
+
+        idx = len(self.sessions) + 1
+        session = AgentSession(
+            idx=idx, goal=goal, run=run,
+            project=self.project, branch=self.branch, cwd=git_root,
+            session_type="reviewer",
+            model_override="claude-haiku-4-5-20251001",
+        )
+        if pr_url:
+            session.output_queue.put(f"→ Reviewing PR: {pr_url}\n")
+        session.thread = threading.Thread(
+            target=self._session_worker, args=(session,), daemon=True,
+        )
+        self.sessions.append(session)
+        session.thread.start()
+        return session
 
     def _auto_remediate_verify(self, output: str, tries_left: int, session: AgentSession) -> bool:
         if tries_left <= 0:
@@ -786,8 +822,10 @@ class FlowOrchestrator:
                 display_last = last
 
             type_colors = {"planner": "magenta", "reviewer": "yellow", "executor": "cyan"}
+            type_labels = {"planner": "plan", "reviewer": "rev", "executor": "exec"}
             color = type_colors.get(session.session_type, "cyan")
-            type_str = f"[{color}]{session.session_type[:4]}[/{color}]"
+            label = type_labels.get(session.session_type, session.session_type[:4])
+            type_str = f"[{color}]{label}[/{color}]"
 
             table.add_row(
                 str(session.idx),
@@ -804,24 +842,103 @@ class FlowOrchestrator:
 
         return table
 
+    # ── Sticky status bar (drill-down) ────────────────────────────────────────
+
+    def _start_sticky_bar(self, session: AgentSession) -> tuple:
+        """Reserve the bottom terminal row and start a status bar writer thread.
+
+        Uses ANSI scroll-region to prevent normal output from overwriting the bar.
+        Returns (stop_event, thread) — caller must call _stop_sticky_bar to clean up.
+        """
+        rows = shutil.get_terminal_size().lines
+        # Constrain scroll region to rows 1..(rows-1); last row is reserved for the bar
+        sys.stdout.write(f"\033[1;{rows - 1}r")
+        sys.stdout.flush()
+
+        bar_stop = threading.Event()
+
+        def _writer():
+            while not bar_stop.is_set():
+                cols, rows = shutil.get_terminal_size()
+                with session.lock:
+                    phase = session.run.phase.value if session.run else "?"
+                    cost = f"${session.run.cost_usd:.4f}" if session.run else ""
+                    last = session.last_line or "…"
+                    status = session.status
+                icon = "●" if status == "running" else ("✓" if status == "done" else "✗")
+                bar = f" {icon} {session.idx}:{session.goal[:22]} │ {phase} │ {cost} │ {last}"
+                bar = bar[:cols]
+                bar = bar + " " * (cols - len(bar))
+                # Save cursor → jump to last row → erase → write bar in reverse video → restore
+                sys.stdout.write(f"\033[s\033[{rows};1H\033[2K\033[7m{bar}\033[m\033[u")
+                sys.stdout.flush()
+                time.sleep(0.4)
+
+        t = threading.Thread(target=_writer, daemon=True)
+        t.start()
+        return bar_stop, t
+
+    def _stop_sticky_bar(self, bar_stop: threading.Event, bar_thread: threading.Thread) -> None:
+        """Stop the status bar writer and restore the full scroll region."""
+        bar_stop.set()
+        bar_thread.join(timeout=1.5)
+        rows = shutil.get_terminal_size().lines
+        # Restore full-terminal scroll region and erase the bar row
+        sys.stdout.write(f"\033[r\033[s\033[{rows};1H\033[2K\033[u")
+        sys.stdout.flush()
+
     # ── Drill-down ────────────────────────────────────────────────────────────
 
-    def _drill_down(self, idx: int, live: Live) -> None:
+    def _get_toolbar(self) -> HTML:
+        """Called by prompt_toolkit every refresh_interval — shows parallel session structure."""
+        self._drain_queues()
+
+        # Refresh cached API spend at most every 5s
+        now = time.monotonic()
+        if now - self._api_spend_last_refresh > 5.0:
+            try:
+                self._api_spend_cache = get_api_spend_today(self.project)
+            except Exception:
+                pass
+            self._api_spend_last_refresh = now
+
+        if not self.sessions:
+            return HTML(" no sessions")
+
+        PHASE_SHORT = {"plan": "plan", "execute": "exec", "verify": "vrfy", "ship": "ship"}
+        TYPE_SHORT = {"executor": "ex", "planner": "pl", "reviewer": "rv"}
+
+        parts = []
+        for s in self.sessions:
+            with s.lock:
+                st = s.status
+            type_tag = TYPE_SHORT.get(s.session_type, s.session_type[:2])
+            if st == "running":
+                phase = PHASE_SHORT.get(s.run.phase.value, s.run.phase.value) if s.run else "?"
+                parts.append(f"<b>[{s.idx}]</b> {type_tag}:{phase}")
+            elif st == "done":
+                parts.append(f"<b>[{s.idx}]</b> ✓")
+            else:
+                parts.append(f"<b>[{s.idx}]</b> ✗")
+
+        cost = f"  <ansicyan>${self._api_spend_cache:.4f}</ansicyan>" if self._api_spend_cache else ""
+        return HTML("  " + "   " .join(parts) + cost)
+
+    def _drill_down(self, idx: int) -> None:
         if idx < 1 or idx > len(self.sessions):
             console.print(f"[red]No session {idx}[/red]")
             return
 
         session = self.sessions[idx - 1]
-        live.stop()
 
         console.print(f"\n[bold]─── Session {idx}: {session.goal} ───[/bold]")
         for chunk in session.output_history:
             console.print(chunk, end="", markup=False, highlight=False)
 
-        stop_event = threading.Event()
+        drain_stop = threading.Event()
 
         def _drain_and_print():
-            while not stop_event.is_set():
+            while not drain_stop.is_set():
                 try:
                     while True:
                         chunk = session.output_queue.get_nowait()
@@ -837,6 +954,8 @@ class FlowOrchestrator:
         drain_thread = threading.Thread(target=_drain_and_print, daemon=True)
         drain_thread.start()
 
+        bar_stop, bar_thread = self._start_sticky_bar(session)
+
         goal_short = session.goal[:20]
         while True:
             try:
@@ -848,12 +967,12 @@ class FlowOrchestrator:
             if cmd in ("/back", "b", ""):
                 break
             if cmd.startswith("/"):
-                console.print("[dim]In drill-down: only /back is accepted. Use /back to return.[/dim]")
+                console.print("[dim]In drill-down: only /back is accepted.[/dim]")
 
-        stop_event.set()
+        drain_stop.set()
         drain_thread.join(timeout=1)
+        self._stop_sticky_bar(bar_stop, bar_thread)
         console.print(f"\n[dim]← Back to orchestrator[/dim]")
-        live.start()
 
     # ── Prompt ────────────────────────────────────────────────────────────────
 
@@ -867,7 +986,7 @@ class FlowOrchestrator:
 
     # ── Slash commands ────────────────────────────────────────────────────────
 
-    def handle_slash(self, cmd: str, live: Optional[Live] = None) -> None:
+    def handle_slash(self, cmd: str) -> None:
         parts = cmd.strip().split(None, 1)
         verb = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
@@ -883,10 +1002,8 @@ class FlowOrchestrator:
         elif verb == "/view":
             if not arg.isdigit():
                 console.print("[red]Usage: /view N[/red]")
-            elif live:
-                self._drill_down(int(arg), live)
             else:
-                console.print("[yellow]/view requires live mode[/yellow]")
+                self._drill_down(int(arg))
         elif verb == "/model":
             m = MODEL_ALIASES.get(arg.lower(), arg)
             self.model_override = m
@@ -1004,17 +1121,11 @@ class FlowOrchestrator:
         self._show_sessions()
 
     def _show_sessions(self) -> None:
+        self._drain_queues()
         if not self.sessions:
             console.print("[dim]No sessions.[/dim]")
             return
-        for s in self.sessions:
-            with s.lock:
-                status = s.status
-                last = s.last_line
-            console.print(
-                f"  [cyan]{s.idx}.[/cyan] [{status}] {s.goal[:50]}  "
-                f"[dim]{s.branch}[/dim]  {last[:60]}"
-            )
+        console.print(self._render_table())
 
     def _show_help(self) -> None:
         console.print(Panel(
@@ -1070,7 +1181,7 @@ class FlowOrchestrator:
             branch=branch,
             cwd=cwd,
             session_type="executor",
-            auto_ship=False,
+            auto_ship=True,
         )
         session._test_task = task  # store the real task text
         session.thread = threading.Thread(
@@ -1079,7 +1190,7 @@ class FlowOrchestrator:
         self.sessions.append(session)
         session.thread.start()
         console.print(
-            f"[dim]→ Test session {idx} started — plan+execute+verify, no ship[/dim]"
+            f"[dim]→ Test session {idx} started — plan+execute+verify+ship[/dim]"
         )
         return session
 
@@ -1133,35 +1244,28 @@ class FlowOrchestrator:
             border_style="cyan",
         ))
 
-        live = Live(refresh_per_second=4, screen=False, console=console)
-        live.start()
-
         with patch_stdout(raw=True):
             while True:
-                self._drain_queues()
-                live.update(self._render_table())
-                live.stop()
-
                 try:
-                    user_input = self.prompt_session.prompt(self._prompt_str()).strip()
+                    user_input = self.prompt_session.prompt(
+                        self._prompt_str(),
+                        bottom_toolbar=self._get_toolbar,
+                        refresh_interval=0.5,
+                    ).strip()
                 except (EOFError, KeyboardInterrupt):
                     console.print("\n[dim]Use /quit to exit.[/dim]")
-                    live.start()
                     continue
-
-                live.start()
 
                 if not user_input:
                     continue
 
                 if user_input.startswith("/"):
-                    self.handle_slash(user_input, live=live)
+                    self.handle_slash(user_input)
                     continue
 
                 if self._try_dispatch_flow_cmd(user_input):
                     continue
 
-                # New task
                 session = self._start_session(user_input)
                 console.print(
                     f"[dim]→ Session {session.idx} started on branch {session.branch}[/dim]"

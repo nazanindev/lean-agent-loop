@@ -1,5 +1,6 @@
 """DuckDB-backed store for RunState, sessions, and subagent events."""
 import json
+import time
 import threading
 import uuid
 from contextlib import contextmanager
@@ -14,14 +15,24 @@ import duckdb
 from flow.config import DB_PATH
 
 # DuckDB allows only one read-write connection at a time per file.
-# All DB access goes through this lock so threads don't race.
+# _db_lock serializes in-process threads; the retry loop handles cross-process
+# contention from claude subprocess hooks that also open DuckDB briefly.
 _db_lock = threading.Lock()
 
 
 @contextmanager
 def _conn():
     with _db_lock:
-        con = duckdb.connect(str(DB_PATH))
+        last_err: Exception = RuntimeError("duckdb.connect never attempted")
+        for attempt in range(6):
+            try:
+                con = duckdb.connect(str(DB_PATH))
+                break
+            except Exception as exc:
+                last_err = exc
+                time.sleep(0.02 * (2 ** attempt))  # 20 40 80 160 320 ms
+        else:
+            raise last_err
         try:
             yield con
         finally:
