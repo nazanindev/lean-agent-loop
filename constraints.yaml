@@ -3,7 +3,6 @@ max_tokens_per_step: 8000
 context_warn_pct: 0.80
 
 # Weighted step budget — each tool call deducts its weight from the budget.
-# Heavy tools (writes, bash) cost more than reads/searches.
 tool_weights:
   Write: 2.0
   Edit: 1.5
@@ -19,47 +18,47 @@ tool_weights:
 
 # Per-phase step budgets (weighted). Overrides max_steps_per_run when set.
 phase_step_budgets:
-  plan: 20.0
-  execute: 60.0
-  verify: 20.0
-  ship: 10.0
+  plan: 15.0
+  execute: 40.0
+  verify: 15.0
+  ship: 8.0
 
-# When plan steps are parsed from ExitPlanMode, max_steps is set to
-# len(plan_steps) * this multiplier (minimum: max_steps_per_run).
+# When plan steps are parsed, max_steps = len(steps) * multiplier (min: max_steps_per_run).
 plan_steps_multiplier: 3.0
 
-# Plan progression control:
-# plan_approval_gate true: require /approve before execute phase
-# plan_approval_gate false: auto-advance from plan to execute
-plan_approval_gate: true
+# ── Auto-pipeline ─────────────────────────────────────────────────────────────
+# All on by default. The pipeline runs prompt → plan → execute → verify → fix → ship
+# without manual intervention. The PR is the review gate.
+auto_verify_on_steps_complete: true   # run verify when all plan steps done
+auto_check_before_ship: true          # run code review before ship
+auto_remediate: true                  # spawn fix worker on verify/check failure
+auto_remediate_max_tries: 2           # cap before surfacing failure to user
 
-# PR shipping control:
-# pr_approval_gate true: require confirmation before /ship triggers commit + PR
-# pr_approval_gate false: /ship proceeds immediately
-pr_approval_gate: true
-
-# ── API spend gate (flow utility calls: clarify, ship, ci-review) ─────────────
-# These hit ANTHROPIC_API_KEY and cost real money. Block Agent spawns if
-# today's total flow API spend exceeds this.
+# ── API spend gate (flow utility calls: check, ship, ci-review) ───────────────
+# These hit ANTHROPIC_API_KEY and cost real money.
 api_spend_gate_usd: 1.00
 
+# ── Agent spawn policy ────────────────────────────────────────────────────────
+# smart: classify agents by tool capability + spend tier (recommended)
+#   - read-only agents (no Write/Edit tools): allowed in any phase, any spend
+#   - write-capable agents, low spend (< gate * 0.5): allowed in any phase
+#   - write-capable agents, medium spend: allowed only in agent_spawns_allowed_in phases
+#   - write-capable agents, high spend (>= gate): blocked
+# phase_only: legacy behavior — only allow agents in agent_spawns_allowed_in phases
+agent_spawn_policy: smart
+
+# Phases where write-capable agents are allowed at medium spend tier (smart policy)
+# or all agents are allowed (phase_only policy).
+agent_spawns_allowed_in:
+  - plan
+  - execute
+
 # ── Clean-state exit checks (Stop hook) ────────────────────────────────────────
-# On session stop during these phases, run verification + artifact checks.
 clean_state_check_phases:
   - verify
   - ship
 
-# Require explicit approval before moving from plan -> execute.
-plan_approval_gate: true
-
-# Require explicit PR approval gate toggle before /ship.
-pr_approval_gate: true
-
-# When true, successful `/verify` in verify phase immediately runs `/ship`
-# if the PR approval gate is off.
-auto_ship_on_verify_pass: false
-
-# Artifact patterns flagged as stale handoff noise when present in git status.
+# Artifact patterns flagged as stale when present in git status.
 clean_state_artifact_patterns:
   - .log
   - .tmp
@@ -67,14 +66,9 @@ clean_state_artifact_patterns:
   - __pycache__
 
 # ── Subscription quota gate (Claude Code sessions) ───────────────────────────
-# Claude Code runs against your claude.ai Pro/Max subscription; sessions cost
-# $0 marginal. We warn (never hard-block — Anthropic enforces the real cap)
-# when quota consumption hits this fraction of the 5-hour window limit.
 subscription_quota_warn_pct: 0.80
 
 # ── Subscription plan caps (messages per 5-hour window) ──────────────────────
-# Set AP_PLAN in ~/.autopilot/.env to match your plan.
-# These are approximate; adjust if Anthropic changes them.
 plan_window_caps:
   pro:      { msgs: 45,   tokens_per_window: 2000000 }
   max5:     { msgs: 225,  tokens_per_window: 10000000 }
@@ -107,10 +101,6 @@ allowed_bash_commands:
   - wc
   - jq
   - curl
-
-# Agent tool spawns only allowed during plan phase
-agent_spawns_allowed_in:
-  - plan
 
 # File edits allowed only during execute, verify, ship phases (plan is read-only)
 edits_allowed_in:
