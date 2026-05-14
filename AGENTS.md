@@ -1,13 +1,13 @@
 # AGENTS.md
 
-This repository builds `flow`: a CLI harness for long-running AI coding sessions.
-The goal is reliable session execution and clean handoffs, not maximum code output.
+This repository builds `flow`: a multi-agent CLI orchestrator for AI coding sessions.
+The goal is reliable session execution, cost visibility, and clean handoffs — not maximum code output.
 
 ## Quick Start
 
 - Install: `pip install -e .`
 - Initialize hooks: `flow init`
-- Start REPL: `flow`
+- Start orchestrator: `flow`
 
 ## Verification
 
@@ -18,9 +18,12 @@ Never treat code as complete until verification passes.
 
 ## Runtime Model
 
-- State machine: `plan -> execute -> verify -> ship`
-- Session state is persisted in DuckDB (`~/.autopilot/costs.duckdb`)
-- Context is injected from structured run artifacts, not raw chat transcripts
+- Each user task spawns an `AgentSession`: git worktree + branch + background thread
+- Sessions run in parallel; the live table shows all of them
+- State machine per session: `plan -> execute -> verify -> ship`
+- Session state persisted in DuckDB (`~/.autopilot/costs.duckdb`)
+- Context injected from structured run artifacts, not raw chat transcripts
+- Hooks fire inside each `claude -p` subprocess (not in the orchestrator process)
 
 ## Hard Constraints
 
@@ -31,13 +34,14 @@ Never treat code as complete until verification passes.
 
 ## Key Files
 
-- `README.md` - product overview and usage
-- `constraints.yaml` - hard runtime limits and gating rules
-- `routing.yaml` - phase and keyword model routing
-- `src/flow/repl.py` - interactive runtime loop
-- `src/flow/hooks/pretool.py` - pre-tool enforcement gate
-- `src/flow/hooks/stop.py` - stop hook usage tracking and clean-state checks
-- `src/flow/tracker.py` - persistent state store
+- `README.md` — product overview and usage
+- `constraints.yaml` — hard runtime limits and gating rules
+- `routing.yaml` — phase and keyword model routing
+- `src/flow/repl.py` — `FlowOrchestrator`: multi-session TUI, `AgentSession` dataclass, drill-down
+- `src/flow/hooks/pretool.py` — pre-tool enforcement gate (step budget, bash allowlist, agent spawn, spend gate)
+- `src/flow/hooks/stop.py` — stop hook usage tracking and clean-state checks
+- `src/flow/tracker.py` — persistent state store (DuckDB)
+- `src/flow/run_manager.py` — `RunState` lifecycle: create, phase transitions, artifact recording
 
 ## Session Exit Expectations
 
