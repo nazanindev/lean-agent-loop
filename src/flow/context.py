@@ -89,8 +89,8 @@ def phase_directive(run: RunState) -> str:
             "`my plan has one step` and do not collapse steps into a paragraph.\n\n"
             "If the user goal names a specific file/path, the first plan step must target that "
             "file/path directly (or explicitly ask a clarification question first).\n\n"
-            "When the plan is complete, call ExitPlanMode with that structured numbered list. "
-            "AI Flow will parse it and move to the next phase based on gate settings."
+            "When the plan is complete, AI Flow will automatically capture your numbered plan "
+            "and move to the next phase based on gate settings."
         )
 
     if run.phase == Phase.execute:

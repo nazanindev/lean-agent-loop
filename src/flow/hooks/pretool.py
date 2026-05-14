@@ -2,13 +2,6 @@
 Claude Code PreToolUse hook — invoked as: python3 -m flow.hooks.pretool
 Enforces hard constraints: step limit, bash whitelist, Agent spawn gate, budget gate.
 Exit 0 = allow. Exit 2 = block (Claude sees the reason).
-
-Billing surfaces:
-  subscription — Claude Code runs against claude.ai Pro/Max login.
-    Agent spawn gated on: AP_NO_SPAWN flag + api_spend_gate_usd (utility $).
-    Quota warnings emitted via stderr when nearing 5-hour window limit.
-  api (AP_FORCE_API_KEY=1) — Claude Code bills via ANTHROPIC_API_KEY.
-    Agent spawn gated on: AP_NO_SPAWN flag + api_spend_gate_usd (real $).
 """
 import json
 import os
@@ -19,7 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path.home() / ".autopilot" / ".env")
 
-from flow.config import get_project_id, constraints, get_plan, get_plan_window_caps
+from flow.config import get_project_id, get_branch, constraints, get_plan, get_plan_window_caps
 from flow.tracker import (
     Phase, init_db, load_active_run, save_run, save_subagent_event,
     get_api_spend_today, get_window_usage,
@@ -28,11 +21,9 @@ from flow.observe import trace_subagent
 
 
 def _parse_plan_steps(plan_text: str) -> list:
-    """Parse strictly structured numbered plan steps from ExitPlanMode."""
     import re
     steps = []
-    raw = plan_text or ""
-    for line in raw.splitlines():
+    for line in (plan_text or "").splitlines():
         m = re.match(
             r"^\s*(?:\*\*)?\s*(?:step\s*)?(\d+)(?:\s*\*\*)?\s*(?:[.)]|:|—|-)\s+(.+)$",
             line,
@@ -52,6 +43,88 @@ def allow() -> None:
     sys.exit(0)
 
 
+# Tools that can modify the filesystem
+_WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+
+
+def _agent_spawn_decision(
+    tool_input: dict,
+    c: dict,
+    project: str,
+    phase: str,
+    session_id: str,
+    run_id: str,
+) -> None:
+    """Apply agent spawn policy and block or fall through."""
+    policy = c.get("agent_spawn_policy", "smart")
+    api_spend_gate = float(os.getenv("AP_BUDGET_USD") or c.get("api_spend_gate_usd", 1.0))
+    api_spend_today = get_api_spend_today(project)
+
+    # Classify agent by its declared tools
+    agent_tools = set(tool_input.get("tools") or [])
+    is_write_capable = bool(agent_tools & _WRITE_TOOLS)
+
+    if policy == "smart":
+        if not is_write_capable:
+            # Read-only agents: always allowed regardless of phase or spend
+            save_subagent_event(session_id, run_id, project, phase, str(tool_input), True)
+            trace_subagent(session_id, run_id, project, phase, True)
+            _maybe_warn_quota(c)
+            return  # fall through to allow()
+
+        # Write-capable agent: tiered spend gate
+        low_tier = api_spend_gate * 0.5
+        if api_spend_today >= api_spend_gate:
+            reason = (
+                f"Write-capable agent blocked: API spend ${api_spend_today:.2f} >= "
+                f"gate ${api_spend_gate:.2f}."
+            )
+            save_subagent_event(session_id, run_id, project, phase, str(tool_input), False, reason)
+            trace_subagent(session_id, run_id, project, phase, False, reason)
+            block(reason)
+
+        if api_spend_today >= low_tier:
+            # Medium tier: check phase allowlist
+            allowed_phases = c.get("agent_spawns_allowed_in", ["plan", "execute"])
+            if phase not in allowed_phases:
+                reason = (
+                    f"Write-capable agent blocked: phase '{phase}' not in {allowed_phases} "
+                    f"at spend ${api_spend_today:.2f} (medium tier)."
+                )
+                save_subagent_event(session_id, run_id, project, phase, str(tool_input), False, reason)
+                trace_subagent(session_id, run_id, project, phase, False, reason)
+                block(reason)
+
+        # Low spend or allowed phase: permit
+        save_subagent_event(session_id, run_id, project, phase, str(tool_input), True)
+        trace_subagent(session_id, run_id, project, phase, True)
+        _maybe_warn_quota(c)
+
+    else:
+        # Legacy phase_only policy
+        allowed_phases = c.get("agent_spawns_allowed_in", ["plan"])
+        if phase not in allowed_phases:
+            reason = (
+                f"Agent spawn blocked: phase '{phase}' not in allowed phases {allowed_phases}."
+            )
+            save_subagent_event(session_id, run_id, project, phase, "", False, reason)
+            trace_subagent(session_id, run_id, project, phase, False, reason)
+            block(reason)
+
+        if api_spend_today >= api_spend_gate:
+            reason = (
+                f"API spend gate: ${api_spend_today:.2f} >= ${api_spend_gate:.2f}. "
+                "Agent spawn blocked."
+            )
+            save_subagent_event(session_id, run_id, project, phase, "", False, reason)
+            trace_subagent(session_id, run_id, project, phase, False, reason)
+            block(reason)
+
+        save_subagent_event(session_id, run_id, project, phase, str(tool_input), True)
+        trace_subagent(session_id, run_id, project, phase, True)
+        _maybe_warn_quota(c)
+
+
 def main() -> None:
     if os.getenv("AP_ACTIVE") != "1":
         sys.exit(0)
@@ -69,14 +142,15 @@ def main() -> None:
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {})
     project = get_project_id()
+    branch = get_branch()
     c = constraints()
 
-    run = load_active_run(project)
+    run = load_active_run(project, branch)
     run_id = run.run_id if run else "none"
     phase = run.phase.value if run else "unknown"
     session_id = payload.get("session_id", str(uuid.uuid4())[:8])
 
-    # ── ExitPlanMode — persist plan steps and advance to execute ─────────────
+    # ── ExitPlanMode — persist plan steps ────────────────────────────────────
     if tool_name == "ExitPlanMode":
         plan_text = tool_input.get("plan_text", "")
         if run and plan_text:
@@ -84,52 +158,20 @@ def main() -> None:
             if steps:
                 from flow.run_manager import set_plan_steps, advance_phase
                 set_plan_steps(run, steps)
-                gate_env = os.getenv("AP_PLAN_GATE", "").strip().lower()
-                if gate_env in {"0", "off", "false"}:
-                    plan_gate_enabled = False
-                elif gate_env in {"1", "on", "true"}:
-                    plan_gate_enabled = True
-                else:
-                    plan_gate_enabled = bool(c.get("plan_approval_gate", True))
-                if not plan_gate_enabled:
-                    advance_phase(run, Phase.execute)
+                # Auto-advance to execute (gates removed)
+                advance_phase(run, Phase.execute)
         allow()
 
     # ── Agent spawn gate ─────────────────────────────────────────────────────
     if tool_name == "Agent":
-        allowed_phases = c.get("agent_spawns_allowed_in", ["plan"])
-        api_spend_gate = float(os.getenv("AP_BUDGET_USD") or c.get("api_spend_gate_usd", 1.0))
         no_spawn = os.getenv("AP_NO_SPAWN", "0") == "1"
-        api_spend_today = get_api_spend_today(project)
-
         if no_spawn:
-            reason = "AP_NO_SPAWN=1: subagent spawning disabled for this session"
+            reason = "AP_NO_SPAWN=1: agent spawning disabled for this session"
             save_subagent_event(session_id, run_id, project, phase, "", False, reason)
             trace_subagent(session_id, run_id, project, phase, False, reason)
             block(reason)
 
-        if phase not in allowed_phases:
-            reason = (
-                f"Subagent spawn blocked: phase '{phase}' not in allowed phases {allowed_phases}. "
-                "Iterate in the main loop instead."
-            )
-            save_subagent_event(session_id, run_id, project, phase, "", False, reason)
-            trace_subagent(session_id, run_id, project, phase, False, reason)
-            block(reason)
-
-        if api_spend_today >= api_spend_gate:
-            reason = (
-                f"API spend gate: today's flow utility spend ${api_spend_today:.2f} >= "
-                f"${api_spend_gate:.2f} limit. Subagent spawn blocked."
-            )
-            save_subagent_event(session_id, run_id, project, phase, "", False, reason)
-            trace_subagent(session_id, run_id, project, phase, False, reason)
-            block(reason)
-
-        # Allowed — log it and emit a quota warning if nearing 5-hour window limit
-        save_subagent_event(session_id, run_id, project, phase, str(tool_input), True)
-        trace_subagent(session_id, run_id, project, phase, True)
-        _maybe_warn_quota(c)
+        _agent_spawn_decision(tool_input, c, project, phase, session_id, run_id)
 
     # ── Bash command whitelist ────────────────────────────────────────────────
     if tool_name == "Bash":
@@ -140,20 +182,40 @@ def main() -> None:
         if allowed_cmds and base_cmd and base_cmd not in allowed_cmds:
             block(f"Bash command '{base_cmd}' not in allowed_bash_commands whitelist.")
 
-    # ── Soft WIP=1 guidance (warn only) ──────────────────────────────────────
+    # ── Edit phase gate ──────────────────────────────────────────────────────
+    if tool_name in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
+        allowed_phases = c.get("edits_allowed_in", ["execute", "verify", "ship"])
+        if phase not in allowed_phases:
+            target_path = tool_input.get("file_path") or tool_input.get("notebook_path")
+            plan_dir = Path.home() / ".claude" / "plans"
+            if target_path:
+                try:
+                    target_resolved = Path(target_path).resolve()
+                    if target_resolved.is_relative_to(plan_dir.resolve()):
+                        pass  # plan files always writable
+                    else:
+                        block(
+                            f"File edits blocked: phase '{phase}' not in {allowed_phases}. "
+                            "Plan phase is read-only for project files."
+                        )
+                except (ValueError, OSError):
+                    block(
+                        f"File edits blocked: phase '{phase}' not in {allowed_phases}."
+                    )
+            else:
+                block(f"File edits blocked: phase '{phase}' not in {allowed_phases}.")
+
+    # ── Soft WIP=1 guidance ───────────────────────────────────────────────────
     if tool_name in {"Write", "Edit", "MultiEdit"}:
         try:
             from flow.features import get_active_feature
-
-            active_feature = get_active_feature()
-            if not active_feature:
+            if not get_active_feature():
                 print(
                     "[flow warn] No active feature in features.yaml. "
                     "Run `flow features pick` before writing to keep WIP=1.",
                     file=sys.stderr,
                 )
         except Exception:
-            # Feature primitive is optional; never block tool execution here.
             pass
 
     # ── Step counter (weighted) ───────────────────────────────────────────────
@@ -182,7 +244,6 @@ def main() -> None:
 
 
 def _maybe_warn_quota(c: dict) -> None:
-    """Print a stderr warning if the subscription quota window is nearly full."""
     warn_pct = float(c.get("subscription_quota_warn_pct", 0.80))
     plan = get_plan()
     caps = get_plan_window_caps()

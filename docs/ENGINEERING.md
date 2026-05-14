@@ -133,6 +133,11 @@ allowed_bash_commands:       # unlisted commands are blocked
 agent_spawns_allowed_in:     # subagents only during planning phase
   - plan
 
+edits_allowed_in:            # file edits restricted to execute/verify/ship phases
+  - execute                  # plan phase is read-only for project files
+  - verify                   # (exception: ~/.claude/plans/* always writable)
+  - ship
+
 allowed_write_paths:
   - "./"
 ```

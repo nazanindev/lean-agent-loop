@@ -255,13 +255,20 @@ def load_run(run_id: str) -> Optional[RunState]:
     return RunState(**{k: v for k, v in d.items() if k in RunState.__dataclass_fields__})
 
 
-def load_active_run(project: str) -> Optional[RunState]:
+def load_active_run(project: str, branch: Optional[str] = None) -> Optional[RunState]:
     with _conn() as con:
-        row = con.execute("""
-            SELECT run_id FROM runs
-            WHERE project = ? AND status = 'active'
-            ORDER BY updated_at DESC LIMIT 1
-        """, [project]).fetchone()
+        if branch:
+            row = con.execute("""
+                SELECT run_id FROM runs
+                WHERE project = ? AND branch = ? AND status = 'active'
+                ORDER BY updated_at DESC LIMIT 1
+            """, [project, branch]).fetchone()
+        else:
+            row = con.execute("""
+                SELECT run_id FROM runs
+                WHERE project = ? AND status = 'active'
+                ORDER BY updated_at DESC LIMIT 1
+            """, [project]).fetchone()
     return load_run(row[0]) if row else None
 
 
