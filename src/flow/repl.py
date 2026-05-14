@@ -78,6 +78,7 @@ class AgentSession:
     cwd: Path
     session_type: str = "executor"    # "executor" | "planner" | "reviewer"
     model_override: Optional[str] = None
+    auto_ship: bool = True            # False skips the ship step (used by test sessions)
     thread: Optional[threading.Thread] = None
     output_queue: queue.Queue = field(default_factory=queue.Queue)
     output_history: List[str] = field(default_factory=list)
@@ -86,6 +87,7 @@ class AgentSession:
     status: str = "running"           # "running" | "done" | "failed"
     last_line: str = ""
     pr_url: str = ""
+    started_at: float = field(default_factory=time.monotonic)
 
 
 class FlowOrchestrator:
@@ -447,6 +449,13 @@ class FlowOrchestrator:
                 self._session_push(session, "✓ Code review passed\n")
             except Exception as e:
                 self._session_push(session, f"Code review skipped: {e}\n")
+
+        if not session.auto_ship:
+            elapsed = time.monotonic() - session.started_at
+            self._session_push(session, f"✓ Test complete in {elapsed:.0f}s — ship skipped\n")
+            with session.lock:
+                session.last_line = f"✓ passed in {elapsed:.0f}s"
+            return
 
         self._session_push(session, "→ Shipping...\n")
         ship_env = {**os.environ, "AP_ACTIVE": "0"}
@@ -857,6 +866,8 @@ class FlowOrchestrator:
             self._show_sessions()
         elif verb == "/prompt":
             self._inject_prompt(arg)
+        elif verb == "/test-flow":
+            self._start_test_session()
         elif verb == "/view":
             if not arg.isdigit():
                 console.print("[red]Usage: /view N[/red]")
@@ -1000,6 +1011,7 @@ class FlowOrchestrator:
             "  plan: <question>  planner — interactive, stays alive, responds to /prompt (opus)\n"
             "  review: <branch>  reviewer — one-shot AI code review of a branch (haiku)\n\n"
             "[bold]Commands:[/bold]\n"
+            "  /test-flow        run a micro smoke test (plan→execute→verify, no ship)\n"
             "  /prompt N <msg>   inject a message into session N\n"
             "  /view N           drill into session N — full output + live tail\n"
             "  /sessions         list all sessions with status\n"
@@ -1012,6 +1024,69 @@ class FlowOrchestrator:
             "  /quit             exit (cleans up completed worktrees)",
             title="AI Flow", border_style="dim",
         ))
+
+    def _start_test_session(self) -> AgentSession:
+        """Start a fixed micro-task that exercises plan→execute→verify without shipping."""
+        task = (
+            "Create exactly two files and nothing else:\n\n"
+            "1. `src/flow/ping.py` containing:\n"
+            "```python\n"
+            "def flow_ping() -> str:\n"
+            "    return 'pong'\n"
+            "```\n\n"
+            "2. `tests/test_ping.py` containing:\n"
+            "```python\n"
+            "from flow.ping import flow_ping\n\n"
+            "def test_ping():\n"
+            "    assert flow_ping() == 'pong'\n"
+            "```\n\n"
+            "Do not modify any other files. Do not add imports or docstrings. "
+            "These two files are the complete deliverable."
+        )
+        cwd, branch = self._create_worktree("test-flow-ping")
+        init_db()
+        run = RunState(goal="[test] add flow_ping smoke test", project=self.project, branch=branch)
+        save_run(run)
+        trace_run_started(run.run_id, run.project, run.branch, run.goal)
+
+        idx = len(self.sessions) + 1
+        session = AgentSession(
+            idx=idx,
+            goal="[test] flow_ping smoke test",
+            run=run,
+            project=self.project,
+            branch=branch,
+            cwd=cwd,
+            session_type="executor",
+            auto_ship=False,
+        )
+        session._test_task = task  # store the real task text
+        session.thread = threading.Thread(
+            target=self._test_session_worker, args=(session,), daemon=True,
+        )
+        self.sessions.append(session)
+        session.thread.start()
+        console.print(
+            f"[dim]→ Test session {idx} started — plan+execute+verify, no ship[/dim]"
+        )
+        return session
+
+    def _test_session_worker(self, session: AgentSession) -> None:
+        try:
+            task = getattr(session, "_test_task", session.goal)
+            self._run_turn(task, session)
+            self._drain_inject(session)
+            with session.lock:
+                if session.status == "running":
+                    session.status = "done"
+        except SystemExit:
+            with session.lock:
+                if session.status == "running":
+                    session.status = "done"
+        except Exception as e:
+            with session.lock:
+                session.status = "failed"
+                session.last_line = str(e)[:100]
 
     def _on_quit(self) -> None:
         done = [s for s in self.sessions if s.status in ("done", "failed")]
