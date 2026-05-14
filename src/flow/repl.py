@@ -14,9 +14,12 @@ import sys
 import threading
 import time
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*", category=UserWarning)
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -647,6 +650,7 @@ class FlowOrchestrator:
                 display_last = last
             else:
                 status_str = phase
+                display_last = last
 
             table.add_row(
                 str(session.idx),
@@ -882,14 +886,6 @@ class FlowOrchestrator:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        import warnings
-        warnings.filterwarnings(
-            "ignore",
-            message=".*urllib3 v2 only supports OpenSSL.*",
-            category=UserWarning,
-            module="urllib3",
-        )
-
         init_db()
 
         from flow.commands.doctor import hook_health_ok, hook_health_one_liner
