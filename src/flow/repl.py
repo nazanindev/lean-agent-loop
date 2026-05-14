@@ -76,9 +76,12 @@ class AgentSession:
     project: str
     branch: str
     cwd: Path
+    session_type: str = "executor"    # "executor" | "planner" | "reviewer"
+    model_override: Optional[str] = None
     thread: Optional[threading.Thread] = None
     output_queue: queue.Queue = field(default_factory=queue.Queue)
     output_history: List[str] = field(default_factory=list)
+    inject_queue: queue.Queue = field(default_factory=queue.Queue)
     lock: threading.Lock = field(default_factory=threading.Lock)
     status: str = "running"           # "running" | "done" | "failed"
     last_line: str = ""
@@ -163,16 +166,35 @@ class FlowOrchestrator:
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
     def _start_session(self, goal: str) -> AgentSession:
-        cwd, branch = self._create_worktree(goal)
+        # Parse session type from prefix: "plan: ..." | "review: ..." | default executor
+        session_type = "executor"
+        model_override = None
+        display_goal = goal
+
+        lower = goal.lower()
+        if lower.startswith("plan:"):
+            session_type = "planner"
+            display_goal = goal[5:].strip()
+            model_override = "claude-opus-4-7"
+        elif lower.startswith("review:"):
+            session_type = "reviewer"
+            display_goal = goal[7:].strip()
+            model_override = "claude-haiku-4-5-20251001"
+
+        cwd, branch = self._create_worktree(display_goal)
 
         init_db()
-        run = RunState(goal=goal, project=self.project, branch=branch)
+        run = RunState(goal=display_goal, project=self.project, branch=branch)
         save_run(run)
-        trace_run_started(run.run_id, run.project, run.branch, goal)
+        trace_run_started(run.run_id, run.project, run.branch, display_goal)
 
         idx = len(self.sessions) + 1
-        session = AgentSession(idx=idx, goal=goal, run=run,
-                               project=self.project, branch=branch, cwd=cwd)
+        session = AgentSession(
+            idx=idx, goal=display_goal, run=run,
+            project=self.project, branch=branch, cwd=cwd,
+            session_type=session_type,
+            model_override=model_override or self.model_override,
+        )
         session.thread = threading.Thread(
             target=self._session_worker, args=(session,), daemon=True,
         )
@@ -182,10 +204,12 @@ class FlowOrchestrator:
 
     def _session_worker(self, session: AgentSession) -> None:
         try:
-            self._run_turn(session.goal, session)
-            with session.lock:
-                if session.status == "running":
-                    session.status = "done"
+            if session.session_type == "planner":
+                self._planner_worker(session)
+            elif session.session_type == "reviewer":
+                self._reviewer_worker(session)
+            else:
+                self._executor_worker(session)
         except SystemExit:
             with session.lock:
                 if session.status == "running":
@@ -194,6 +218,93 @@ class FlowOrchestrator:
             with session.lock:
                 session.status = "failed"
                 session.last_line = str(e)[:100]
+
+    def _executor_worker(self, session: AgentSession) -> None:
+        """Standard pipeline: plan → execute → verify → fix → ship."""
+        self._run_turn(session.goal, session)
+        # Drain any messages injected while this turn was running
+        self._drain_inject(session)
+        with session.lock:
+            if session.status == "running":
+                session.status = "done"
+
+    def _planner_worker(self, session: AgentSession) -> None:
+        """Interactive planning session: runs forever, responds to /prompt N."""
+        self._run_turn(session.goal, session)
+        self._session_push(session, "\n[planner] Waiting — use /prompt to continue\n")
+        while True:
+            with session.lock:
+                if session.status != "running":
+                    return
+            try:
+                msg = session.inject_queue.get(timeout=0.5)
+                self._session_push(session, f"\n→ [prompt] {msg}\n")
+                self._run_turn(msg, session)
+                self._session_push(session, "\n[planner] Waiting — use /prompt to continue\n")
+            except queue.Empty:
+                continue
+
+    def _reviewer_worker(self, session: AgentSession) -> None:
+        """One-shot AI code review of a branch or HEAD."""
+        target = session.goal.strip() or "HEAD"
+        self._session_push(session, f"→ Reviewing {target}...\n")
+
+        # Try branch diff first, fall back to HEAD diff
+        for diff_args in (["diff", f"main...{target}"], ["diff", target], ["diff", "HEAD"]):
+            r = subprocess.run(
+                ["git"] + diff_args,
+                capture_output=True, text=True, cwd=str(session.cwd),
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                diff = r.stdout
+                break
+        else:
+            diff = ""
+
+        if not diff.strip():
+            self._session_push(session, "No diff found — nothing to review.\n")
+            with session.lock:
+                session.status = "done"
+            return
+
+        try:
+            from flow.commands.check import run_check
+            report = run_check(diff_text=diff)
+            overall = report.get("overall", "?")
+            blockers = report.get("blocker_count", 0)
+            warnings_ = report.get("warning_count", 0)
+            self._session_push(
+                session,
+                f"Overall: {overall} | Blockers: {blockers} | Warnings: {warnings_}\n"
+                f"{report.get('summary', '')}\n",
+            )
+            for f in report.get("findings", []):
+                loc = f.get("file", "") or "unknown"
+                if f.get("line"):
+                    loc = f"{loc}:{f['line']}"
+                self._session_push(
+                    session,
+                    f"  [{f['severity']}] {f['title']} — {loc}\n"
+                    f"    {f.get('detail', '')}\n"
+                    f"    → {f.get('action', '')}\n",
+                )
+            with session.lock:
+                session.last_line = f"{overall} | {blockers}B {warnings_}W"
+        except Exception as e:
+            self._session_push(session, f"Review failed: {e}\n")
+
+        with session.lock:
+            session.status = "done"
+
+    def _drain_inject(self, session: AgentSession) -> None:
+        """Process any queued /prompt messages after the current turn."""
+        while True:
+            try:
+                msg = session.inject_queue.get_nowait()
+                self._session_push(session, f"\n→ [prompt injected] {msg}\n")
+                self._run_turn(msg, session)
+            except queue.Empty:
+                break
 
     # ── Plan helpers ──────────────────────────────────────────────────────────
 
@@ -401,7 +512,7 @@ class FlowOrchestrator:
     # ── Claude subprocess ─────────────────────────────────────────────────────
 
     def _launch_claude(self, task: str, session: AgentSession) -> str:
-        model = self.model_override or model_for(session.run.phase, session.run.goal)
+        model = session.model_override or self.model_override or model_for(session.run.phase, session.run.goal)
         briefing = get_session_briefing(session.run)
         directive = phase_directive(session.run)
 
@@ -619,6 +730,7 @@ class FlowOrchestrator:
             border_style="dim", expand=True,
         )
         table.add_column("#", width=3, justify="right")
+        table.add_column("Type", width=8)
         table.add_column("Task", ratio=3)
         table.add_column("Phase", width=8)
         table.add_column("Steps", width=6)
@@ -652,17 +764,22 @@ class FlowOrchestrator:
                 status_str = phase
                 display_last = last
 
+            type_colors = {"planner": "magenta", "reviewer": "yellow", "executor": "cyan"}
+            color = type_colors.get(session.session_type, "cyan")
+            type_str = f"[{color}]{session.session_type[:4]}[/{color}]"
+
             table.add_row(
                 str(session.idx),
-                session.goal[:55],
+                type_str,
+                session.goal[:50],
                 status_str,
                 steps_str,
                 cost_str,
-                display_last[:80],
+                display_last[:75],
             )
 
         if not self.sessions:
-            table.add_row("", "[dim]No sessions yet — type a task to start[/dim]", "", "", "", "")
+            table.add_row("", "", "[dim]No sessions yet — type a task to start[/dim]", "", "", "", "")
 
         return table
 
@@ -738,6 +855,8 @@ class FlowOrchestrator:
             self._show_status()
         elif verb == "/sessions":
             self._show_sessions()
+        elif verb == "/prompt":
+            self._inject_prompt(arg)
         elif verb == "/view":
             if not arg.isdigit():
                 console.print("[red]Usage: /view N[/red]")
@@ -779,6 +898,27 @@ class FlowOrchestrator:
             sentinel = DB_PATH.parent / f"stop_{s.run.run_id}"
             sentinel.touch()
             console.print(f"[yellow]→ Stop signal sent to session {s.idx}[/yellow]")
+
+    def _inject_prompt(self, arg: str) -> None:
+        parts = arg.split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            console.print("[red]Usage: /prompt N <message>[/red]")
+            return
+        idx = int(parts[0])
+        msg = parts[1].strip()
+        if not msg:
+            console.print("[red]Message cannot be empty.[/red]")
+            return
+        if idx < 1 or idx > len(self.sessions):
+            console.print(f"[red]No session {idx}[/red]")
+            return
+        session = self.sessions[idx - 1]
+        with session.lock:
+            if session.status != "running":
+                console.print(f"[yellow]Session {idx} is not running.[/yellow]")
+                return
+        session.inject_queue.put(msg)
+        console.print(f"[dim]→ Message queued for session {idx} ({session.session_type})[/dim]")
 
     def _resume(self, run_id: str) -> None:
         from flow.tracker import get_recent_runs
@@ -855,19 +995,21 @@ class FlowOrchestrator:
 
     def _show_help(self) -> None:
         console.print(Panel(
+            "[bold]Session types (prefix your task):[/bold]\n"
+            "  <task>            executor — full pipeline: plan → execute → verify → ship\n"
+            "  plan: <question>  planner — interactive, stays alive, responds to /prompt (opus)\n"
+            "  review: <branch>  reviewer — one-shot AI code review of a branch (haiku)\n\n"
             "[bold]Commands:[/bold]\n"
-            "  /view N           drill into session N (read-only output)\n"
-            "  /sessions         list all sessions\n"
+            "  /prompt N <msg>   inject a message into session N\n"
+            "  /view N           drill into session N — full output + live tail\n"
+            "  /sessions         list all sessions with status\n"
             "  /status           cost, quota, all sessions\n"
-            "  /model <name>     force model (opus / sonnet / haiku)\n"
+            "  /model <name>     force model for new sessions (opus / sonnet / haiku)\n"
             "  /no-agents        toggle subagent spawning\n"
             "  /budget $X        set API spend cap\n"
             "  /stop [N]         stop session N (or all running)\n"
             "  /resume [id]      attach to an interrupted run\n"
-            "  /quit             exit\n\n"
-            "[bold]Pipeline:[/bold]\n"
-            "  prompt → plan → execute → verify → fix loop → PR\n"
-            "  Each task runs in its own git worktree + branch.",
+            "  /quit             exit (cleans up completed worktrees)",
             title="AI Flow", border_style="dim",
         ))
 
