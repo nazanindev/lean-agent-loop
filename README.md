@@ -251,3 +251,5 @@ auto_remediate_max_tries: 2           # cap before surfacing to user
 ---
 
 For engineering internals, billing surfaces, observability, and the style system, see [ENGINEERING.md](docs/ENGINEERING.md).
+
+<!-- dummy: PR smoke test -->
