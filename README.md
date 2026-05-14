@@ -9,37 +9,15 @@ flow [$0.00] > add JWT authentication to the API
 
 → Session 1 started on branch flow-add-jwt-authentication-a3f2
 
-flow [$0.03 | 1 running] > fix the race condition in the queue processor
+flow [$0.03 | 2 running] > fix the race condition in the queue processor
 
 → Session 2 started on branch flow-fix-the-race-condition-in-b1e9
 
-  flow  |  $0.03 today  |  2 running
-
-  #   Task                             Phase    Steps   Cost    Last output
-  1   add JWT authentication to the…  execute  4/8     $0.02   → writing auth.py
-  2   fix race condition in queue p…   plan     —       $0.01   Claude: Here's my plan...
-
-flow [$0.11 | 2 running] > /view 1
-
-─── Session 1: add JWT authentication to the API ───
-→ claude-opus-4-7 | plan
-Claude: Here's the plan:
-1. Add PyJWT dependency
-2. Implement auth middleware
-3. Protect routes
-4. Add tests
-
-✓ Plan captured — executing
-→ claude-sonnet-4-6 | execute
-Claude: ...
-✓ Steps done (4/8)
-
-[1:add JWT authentica] (read-only) > /back
-
-← Back to orchestrator
-
-flow [$0.24 | 1 running] > _
+flow [$0.11 | 2 running] > _
+  [1] ex:execute   [2] ex:plan   $0.11
 ```
+
+The bottom bar updates live every 500ms. Sessions run in parallel — each in its own git worktree, each with its own model and pipeline.
 
 When a session finishes:
 
@@ -48,8 +26,7 @@ When a session finishes:
 ✓ Code review passed
 → Shipping...
 ✓ PR created: https://github.com/you/repo/pull/42
-
-API: $0.12 this run / $0.24 today
+→ Reviewer spawned as session 3
 ```
 
 ---
@@ -58,30 +35,29 @@ API: $0.12 this run / $0.24 today
 
 Plain `claude` sessions have no cost visibility, no bounds on agent spawning, and no automated path to a PR. `flow` adds all of that without adding friction:
 
-- **Orchestrator view** — live table of all running sessions with phase, steps, cost, and last output
 - **Parallel sessions** — each task runs in its own git worktree + branch; no file conflicts
-- **Drill-down** — `/view N` shows a session's full output history + live tail
+- **Live status bar** — phase and session state update at the prompt, no commands needed
+- **Session types** — executor (full pipeline), planner (interactive), reviewer (one-shot review)
+- **Drill-down** — `/view N` shows a session's full output history + live tail with sticky status bar
 - **Cost visible at all times** — API spend in the prompt, per-run, per-project
 - **Hard limits enforced by hooks** — step budgets, bash allowlist, agent spawn gates; the model can't bypass them
-- **Automatic pipeline** — verify → fix loop → code review → ship; no manual phase management
+- **Automatic pipeline** — verify → fix loop → code review → ship → reviewer spawned; no manual gates
 - **Smart agent gating** — read-only subagents always allowed; write-capable ones gated by spend tier
-
-The PR is the review gate. `flow` doesn't add another one.
 
 ---
 
 ## How it works
 
 ```
-flow REPL → sessions (each: claude -p in worktree + hooks) → auto verify / check / ship → PR
+flow REPL → sessions (each: claude -p in worktree + hooks) → verify / check / ship → PR → reviewer
 ```
 
 | Property | Mechanism |
 |---|---|
-| **Parallel** | Each task gets a git worktree + branch. Sessions run as background threads with live status in the table. |
-| **Cost-aware** | Two billing surfaces tracked separately: subscription quota (msgs/window) + API USD (utility calls). Spend gate blocks writes over budget. |
+| **Parallel** | Each task gets a git worktree + branch. Sessions run as daemon threads; the live toolbar tracks all of them. |
+| **Cost-aware** | Two billing surfaces tracked separately: subscription quota (msgs/5h window) + API USD (utility calls). Spend gate blocks writes over budget. |
 | **Bounded** | Weighted step budgets per phase, bash allowlist, subagent spawn policy enforced via `PreToolUse` hook — not prompts. |
-| **Automatic** | All steps done → verify → auto-remediate if failing (capped) → code review → ship. No manual gates. |
+| **Automatic** | All steps done → verify → auto-remediate if failing (capped) → code review → ship → reviewer auto-spawned. No manual gates. |
 
 State lives in DuckDB (`~/.autopilot/costs.duckdb`), not chat history. Each session gets a structured briefing injected so runs are resumable and cost is attributable.
 
@@ -133,24 +109,55 @@ echo 'export PATH="$HOME/Library/Python/3.9/bin:$PATH"' >> ~/.zshrc && source ~/
 flow
 ```
 
-Type a task. A new session starts immediately in a background thread with its own git worktree. Type another task while the first is running — they run in parallel, each visible in the live table.
+Type a task. A new session starts immediately in a background thread with its own git worktree and branch. Type another task while the first is running — they execute in parallel, each tracked in the live status bar.
+
+### Session types
+
+Prefix your task to control the session type:
+
+| Prefix | Type | Model | Behavior |
+|---|---|---|---|
+| _(none)_ | executor | sonnet | Full pipeline: plan → execute → verify → ship → reviewer spawned |
+| `plan: <question>` | planner | opus | Interactive: stays alive, loops on `/prompt N` messages |
+| `review: <branch>` | reviewer | haiku | One-shot: git diff of branch → AI findings report |
 
 ```
-flow [$0.14 | exec 4/8] > _
+flow [$0.00] > plan: how should we structure the auth layer?
+
+→ Session 1 (planner) started
+
+flow [$0.01 | 1 running] > /prompt 1 what about refresh tokens?
+
+→ Message queued for session 1 (planner)
+
+flow [$0.02 | 1 running] > review: feat/auth
+
+→ Session 2 (reviewer) started
 ```
 
-The prompt shows API spend today and how many sessions are running.
+### Live status bar
+
+The bottom of the terminal always shows session state — no commands needed:
+
+```
+  [1] pl:plan   [2] rv:exec   [3] ex:execute   [4] ✓   $0.18
+```
+
+- `[N]` = session index
+- `pl` / `rv` / `ex` = planner / reviewer / executor
+- `:phase` = current phase for running sessions
+- `✓` / `✗` = done / failed
 
 ### Slash commands
-
-Ten commands. Visibility and emergency brakes only — the pipeline handles everything else.
 
 | Command | Effect |
 |---|---|
 | `/view N` | Drill into session N — full output history + live tail |
-| `/back` | Return to orchestrator view (from drill-down) |
-| `/sessions` | List all sessions with status |
+| `/back` | Return to orchestrator (from drill-down) |
+| `/sessions` | Print the full session table |
 | `/status` | Cost, quota window, all sessions |
+| `/prompt N <msg>` | Inject a message into session N's queue |
+| `/test-flow` | Smoke test — runs a minimal task through the full pipeline |
 | `/model opus\|sonnet\|haiku` | Force model for new sessions |
 | `/no-agents` | Toggle subagent spawning |
 | `/budget $X` | Set API spend cap |
@@ -158,9 +165,27 @@ Ten commands. Visibility and emergency brakes only — the pipeline handles ever
 | `/resume [run_id]` | Attach to an interrupted run |
 | `/quit` | Exit (cleans up completed worktrees) |
 
+### Drill-down
+
+`/view N` enters a session's output stream. A sticky status bar stays pinned at the bottom showing the session's current phase and cost while output scrolls above:
+
+```
+─── Session 1: add JWT authentication to the API ───
+→ claude-opus-4-7 | plan
+Claude: Here's my plan:
+1. Add PyJWT dependency
+...
+
+[1:add JWT authentica] (read-only) > /back
+
+← Back to orchestrator
+```
+
+Only `/back` or Enter exits drill-down. The session keeps running in the background.
+
 ### CLI commands — scripting and CI only
 
-These are designed for use outside the REPL (scripts, CI pipelines, one-off checks). Use slash commands inside the REPL.
+These run outside the REPL (scripts, CI pipelines, one-off checks).
 
 ```sh
 flow status              # quota window + API spend + active run
@@ -171,7 +196,7 @@ flow verify              # run tests/lint
 flow check               # AI code review on git diff HEAD (--json for structured output)
 flow ship                # verify → commit → PR
 flow ship --branch-name feat/x --pr-title "My title"
-flow resume [run-id]     # resume interrupted run (CLI shorthand)
+flow resume [run-id]     # resume interrupted run
 flow serve               # local dashboard on :7331
 flow ci-review --pr 42   # AI review for CI (GitHub Actions)
 flow ci-review --diff path/to/file.diff
