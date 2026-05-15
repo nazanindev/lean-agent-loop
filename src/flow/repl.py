@@ -89,6 +89,7 @@ class AgentSession:
     last_line: str = ""
     pr_url: str = ""
     started_at: float = field(default_factory=time.monotonic)
+    waiting_for_input: bool = False   # planner is paused, needs /prompt
 
 
 class FlowOrchestrator:
@@ -102,6 +103,7 @@ class FlowOrchestrator:
         self.auto_remediate = bool(c.get("auto_remediate", True))
         self.auto_remediate_max_tries = int(c.get("auto_remediate_max_tries", 2))
         self._api_spend_cache: float = 0.0
+        self._sub_tokens_cache: int = 0
         self._api_spend_last_refresh: float = 0.0
         self.auto_verify = bool(c.get("auto_verify_on_steps_complete", True))
         self.auto_check = bool(c.get("auto_check_before_ship", True))
@@ -181,11 +183,11 @@ class FlowOrchestrator:
         display_goal = goal
 
         lower = goal.lower()
-        if lower.startswith("plan:"):
+        if lower.startswith("plan:") or lower.startswith("plan "):
             session_type = "planner"
             display_goal = goal[5:].strip()
             model_override = "claude-opus-4-7"
-        elif lower.startswith("review:"):
+        elif lower.startswith("review:") or lower.startswith("review "):
             session_type = "reviewer"
             display_goal = goal[7:].strip()
             model_override = "claude-haiku-4-5-20251001"
@@ -245,16 +247,22 @@ class FlowOrchestrator:
     def _planner_worker(self, session: AgentSession) -> None:
         """Interactive planning session: runs forever, responds to /prompt N."""
         self._run_turn(session.goal, session)
-        self._session_push(session, "\n[planner] Waiting — use /prompt to continue\n")
+        self._session_push(session, "\n[planner] Waiting — use /view to reply\n")
+        with session.lock:
+            session.waiting_for_input = True
         while True:
             with session.lock:
                 if session.status != "running":
                     return
             try:
                 msg = session.inject_queue.get(timeout=0.5)
+                with session.lock:
+                    session.waiting_for_input = False
                 self._session_push(session, f"\n→ [prompt] {msg}\n")
                 self._run_turn(msg, session)
-                self._session_push(session, "\n[planner] Waiting — use /prompt to continue\n")
+                self._session_push(session, "\n[planner] Waiting — use /view to reply\n")
+                with session.lock:
+                    session.waiting_for_input = True
             except queue.Empty:
                 continue
 
@@ -560,7 +568,7 @@ class FlowOrchestrator:
 
     def _launch_claude(self, task: str, session: AgentSession) -> str:
         model = session.model_override or self.model_override or model_for(session.run.phase, session.run.goal)
-        briefing = get_session_briefing(session.run)
+        briefing = get_session_briefing(session.run, cwd=session.cwd)
         directive = phase_directive(session.run)
 
         initial_message = (
@@ -957,17 +965,31 @@ class FlowOrchestrator:
         bar_stop, bar_thread = self._start_sticky_bar(session)
 
         goal_short = session.goal[:20]
+        type_tag = {"planner": "plan", "reviewer": "rev", "executor": "exec"}.get(
+            session.session_type, session.session_type
+        )
         while True:
             try:
                 cmd = self.prompt_session.prompt(
-                    f"[{idx}:{goal_short}] (read-only) > "
+                    f"[{idx}:{goal_short}:{type_tag}] > "
                 ).strip()
             except (EOFError, KeyboardInterrupt):
                 break
-            if cmd in ("/back", "b", ""):
+            if not cmd or cmd in ("/back", "b"):
                 break
-            if cmd.startswith("/"):
-                console.print("[dim]In drill-down: only /back is accepted.[/dim]")
+            if cmd.startswith("/prompt "):
+                msg = cmd[8:].strip()
+                if msg:
+                    session.inject_queue.put(msg)
+                    console.print(f"[dim]→ queued[/dim]")
+            elif cmd.startswith("/back"):
+                break
+            elif cmd.startswith("/"):
+                console.print("[dim]drill-down: /prompt <msg> to inject, /back to exit[/dim]")
+            else:
+                # Plain text also injects
+                session.inject_queue.put(cmd)
+                console.print(f"[dim]→ queued[/dim]")
 
         drain_stop.set()
         drain_thread.join(timeout=1)
@@ -1199,6 +1221,13 @@ class FlowOrchestrator:
             task = getattr(session, "_test_task", session.goal)
             self._run_turn(task, session)
             self._drain_inject(session)
+            # Force pipeline if Claude wrote files but didn't emit STEP_DONE markers
+            r = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, cwd=str(session.cwd),
+            )
+            if r.stdout.strip() and session.status == "running":
+                self._run_pipeline(session)
             with session.lock:
                 if session.status == "running":
                     session.status = "done"
@@ -1296,4 +1325,5 @@ class FlowOrchestrator:
 
 
 def start_repl() -> None:
-    FlowOrchestrator().start()
+    from flow.tui import start_tui
+    start_tui()

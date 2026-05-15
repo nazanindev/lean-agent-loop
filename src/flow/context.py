@@ -1,8 +1,37 @@
 """Context injection — builds session briefing from RunState (not chat history)."""
+import subprocess
+from pathlib import Path
+from typing import Optional
 from flow.tracker import RunState, Phase
 
 
-def build_briefing(run: RunState, style: dict = None) -> str:
+def _repo_tree(cwd: Optional[Path] = None, max_files: int = 80) -> str:
+    """Compact file listing from git ls-files, grouped by top-level directory."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(cwd) if cwd else None,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return ""
+        lines = result.stdout.strip().splitlines()
+        if len(lines) > max_files:
+            # Summarize by directory when too many files
+            from collections import Counter
+            dirs = Counter(
+                (Path(l).parts[0] if "/" in l else ".") for l in lines
+            )
+            summary = "  " + "\n  ".join(
+                f"{d}/  ({n} files)" for d, n in sorted(dirs.items())
+            )
+            return f"({len(lines)} files — top-level dirs)\n{summary}"
+        return "  " + "\n  ".join(lines)
+    except Exception:
+        return ""
+
+
+def build_briefing(run: RunState, style: dict = None, cwd: Optional[Path] = None) -> str:
     """Compact structured briefing injected at the start of each Claude session."""
     artifacts_str = "\n".join(f"  - {a}" for a in run.artifacts) or "  (none yet)"
     decisions_str = "\n".join(f"  - {d}" for d in run.decisions) or "  (none yet)"
@@ -47,6 +76,9 @@ def build_briefing(run: RunState, style: dict = None) -> str:
         if sp:
             agent_style_str = f"\n**Agent style:**\n{sp}\n"
 
+    tree = _repo_tree(cwd)
+    repo_str = f"\n**Repo files:**\n{tree}\n" if tree else ""
+
     return f"""## AUTOPILOT SESSION BRIEFING
 > This is a structured run context, not a chat history. Do not reference prior conversation.
 
@@ -66,7 +98,7 @@ def build_briefing(run: RunState, style: dict = None) -> str:
 
 **Context summary:**
 {run.context_summary or "(no prior summary — this is the first session for this run)"}
-{agent_style_str}
+{repo_str}{agent_style_str}
 ---
 """
 

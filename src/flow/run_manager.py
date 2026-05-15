@@ -133,5 +133,5 @@ def save_pr_url(run: RunState, pr_url: str) -> RunState:
     return run
 
 
-def get_session_briefing(run: RunState) -> str:
-    return build_briefing(run)
+def get_session_briefing(run: RunState, cwd=None) -> str:
+    return build_briefing(run, cwd=cwd)
