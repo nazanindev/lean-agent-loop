@@ -1042,7 +1042,7 @@ class FlowOrchestrator:
             branch=branch,
             cwd=cwd,
             session_type="executor",
-            auto_ship=False,
+            auto_ship=True,
         )
         session._test_task = task  # store the real task text
         session.thread = threading.Thread(
