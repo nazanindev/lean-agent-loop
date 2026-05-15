@@ -72,3 +72,5 @@ flow ci-review --pr 42           # for GitHub Actions
 - [`gh`](https://cli.github.com) (for `flow ship` and CI review)
 - A GitHub repo with `origin` set
 - Anthropic API key
+
+<!-- dummy: 2026-05-14 -->
