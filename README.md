@@ -2,7 +2,7 @@
 
 Personal AI dev harness built on Claude Code. Parallel agents, terminal control room, automatic pipeline from task to PR.
 
-Add sub-agent spawn guardrails, cost controls, and context management. 
+Adds sub-agent spawn guardrails, cost controls, and context management. 
 
 ![flow control room](docs/screenshot.png)
 
