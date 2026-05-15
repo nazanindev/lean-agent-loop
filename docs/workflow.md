@@ -42,3 +42,5 @@ Use this checklist after lifecycle or shipping-flow changes.
    - `dimensions.correctness|architecture|test_coverage`
    - `findings`
    - `blocker_count|warning_count|note_count`
+
+<!-- dummy change for pipeline smoke test -->
