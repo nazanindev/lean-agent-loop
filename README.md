@@ -4,7 +4,6 @@ Personal AI dev harness built on Claude Code. Parallel agents, terminal control 
 
 ![flow control room](docs/screenshot.png)
 
-Three sessions running simultaneously: a planner working through an architecture question, an executor that just shipped rate limiting, and a reviewer that auto-spawned after the ship.
 
 ---
 
