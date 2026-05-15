@@ -9,7 +9,6 @@ import os
 import queue
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
@@ -23,12 +22,9 @@ from typing import Any, Dict, List, Optional
 warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*", category=UserWarning)
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
 from flow.config import DB_PATH, constraints, get_project_id, get_branch, get_plan, get_plan_window_caps
@@ -90,6 +86,7 @@ class AgentSession:
     pr_url: str = ""
     started_at: float = field(default_factory=time.monotonic)
     waiting_for_input: bool = False   # planner is paused, needs /prompt
+    _turn_depth: int = field(default=0, compare=False)  # recursion guard for _run_turn
 
 
 class FlowOrchestrator:
@@ -109,14 +106,29 @@ class FlowOrchestrator:
         self.auto_check = bool(c.get("auto_check_before_ship", True))
         self.prompt_session = PromptSession(
             history=FileHistory(str(HISTORY_PATH)),
-            style=Style.from_dict({
-                "prompt": "bold cyan",
-                # Transparent bg, dim fg — inherits the terminal's own theme
-                "bottom-toolbar": "bg:default fg:ansibrightblack",
-            }),
+            style=Style.from_dict({"prompt": "bold cyan"}),
         )
 
-    # ── Git worktree ──────────────────────────────────────────────────────────
+    # ── Git helpers ───────────────────────────────────────────────────────────
+
+    def _get_default_branch(self, cwd: str = ".") -> str:
+        """Detect the repo's default branch via origin/HEAD, falling back to common names."""
+        r = subprocess.run(
+            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            capture_output=True, text=True, cwd=cwd,
+        )
+        if r.returncode == 0:
+            ref = r.stdout.strip()
+            if "/" in ref:
+                return ref.split("/", 1)[1]
+        for candidate in ("main", "master", "develop", "trunk"):
+            r = subprocess.run(
+                ["git", "rev-parse", "--verify", candidate],
+                capture_output=True, text=True, cwd=cwd,
+            )
+            if r.returncode == 0:
+                return candidate
+        return "main"
 
     def _git_root(self) -> Path:
         try:
@@ -234,12 +246,17 @@ class FlowOrchestrator:
             with session.lock:
                 session.status = "failed"
                 session.last_line = str(e)[:100]
+            self._remove_worktree(session)
 
     def _executor_worker(self, session: AgentSession) -> None:
         """Standard pipeline: plan → execute → verify → fix → ship."""
         self._run_turn(session.goal, session)
-        # Drain any messages injected while this turn was running
-        self._drain_inject(session)
+        # Only drain injected messages if the auto-pipeline didn't already finish
+        # the session — otherwise each queued message spawns a spurious Claude turn.
+        with session.lock:
+            still_running = session.status == "running"
+        if still_running:
+            self._drain_inject(session)
         with session.lock:
             if session.status == "running":
                 session.status = "done"
@@ -271,8 +288,8 @@ class FlowOrchestrator:
         target = session.goal.strip() or "HEAD"
         self._session_push(session, f"→ Reviewing {target}...\n")
 
-        # Try branch diff first, fall back to HEAD diff
-        for diff_args in (["diff", f"main...{target}"], ["diff", target], ["diff", "HEAD"]):
+        default_branch = self._get_default_branch(str(session.cwd))
+        for diff_args in (["diff", f"{default_branch}...{target}"], ["diff", target], ["diff", "HEAD"]):
             r = subprocess.run(
                 ["git"] + diff_args,
                 capture_output=True, text=True, cwd=str(session.cwd),
@@ -357,12 +374,26 @@ class FlowOrchestrator:
     # ── Turn execution ────────────────────────────────────────────────────────
 
     def _run_turn(self, task: str, session: AgentSession) -> str:
+        session._turn_depth += 1
+        if session._turn_depth > 8:
+            session._turn_depth -= 1
+            self._session_push(session, "✗ Pipeline recursion limit reached — stopping.\n")
+            with session.lock:
+                session.status = "failed"
+            return ""
+        try:
+            return self._run_turn_inner(task, session)
+        finally:
+            session._turn_depth -= 1
+
+    def _run_turn_inner(self, task: str, session: AgentSession) -> str:
         response_text = self._launch_claude(task, session)
 
         prev_phase = session.run.phase
         updated = load_run(session.run.run_id)
         if updated:
-            session.run = updated
+            with session.lock:
+                session.run = updated
 
         # Fallback plan step parsing if ExitPlanMode wasn't called
         if session.run.phase == Phase.plan and not session.run.plan_steps and response_text:
@@ -371,9 +402,11 @@ class FlowOrchestrator:
                 set_plan_steps(session.run, parsed)
                 updated = load_run(session.run.run_id)
                 if updated:
-                    session.run = updated
+                    with session.lock:
+                        session.run = updated
                 advance_phase(session.run, Phase.execute)
-                session.run.phase = Phase.execute
+                with session.lock:
+                    session.run.phase = Phase.execute
                 self._session_push(session, "✓ Plan captured — executing\n")
 
         # Detect STEP_DONE markers in execute phase
@@ -445,7 +478,7 @@ class FlowOrchestrator:
                     capture_output=True, text=True, cwd=str(session.cwd),
                 )
                 from flow.commands.check import run_check
-                report = run_check(diff_text=diff_result.stdout or None)
+                report = run_check(diff_text=diff_result.stdout or None, run_id=session.run.run_id)
                 blockers = int(report.get("blocker_count", 0))
                 overall = report.get("overall", "?")
                 self._session_push(
@@ -557,7 +590,7 @@ class FlowOrchestrator:
                 ["git", "diff", "HEAD"], capture_output=True, text=True, cwd=str(session.cwd),
             )
             from flow.commands.check import run_check
-            new_report = run_check(diff_text=diff_result.stdout or None)
+            new_report = run_check(diff_text=diff_result.stdout or None, run_id=session.run.run_id)
         except Exception:
             return False
         if new_report.get("blocker_count", 0) == 0:
@@ -588,7 +621,7 @@ class FlowOrchestrator:
         c = constraints()
         max_turns = int(c.get("max_steps_per_run", 30))
         perm = os.getenv("AP_CLAUDE_PERMISSION_MODE", "bypassPermissions")
-        timeout_s = int(os.getenv("AP_CLAUDE_TIMEOUT_S", "180"))
+        timeout_s = int(os.getenv("AP_CLAUDE_TIMEOUT_S", "600"))
         stream_enabled = os.getenv("AP_CLAUDE_STREAM", "1") != "0"
         output_format = "stream-json" if stream_enabled else "json"
 
@@ -654,13 +687,14 @@ class FlowOrchestrator:
                 break
             if (time.monotonic() - start_ts) > timeout_s:
                 proc.kill()
-                self._session_push(session, f"Timed out after {timeout_s}s\n")
+                self._session_push(
+                    session,
+                    f"\n✗ Timed out after {timeout_s}s — set AP_CLAUDE_TIMEOUT_S to increase\n",
+                )
+                with session.lock:
+                    session.status = "failed"
+                    session.last_line = f"timeout after {timeout_s}s"
                 break
-            try:
-                stream_name, line = q.get(timeout=0.2)
-            except queue.Empty:
-                continue
-
             sentinel = DB_PATH.parent / f"stop_{session.run.run_id}"
             if sentinel.exists():
                 sentinel.unlink(missing_ok=True)
@@ -668,6 +702,11 @@ class FlowOrchestrator:
                 proc.kill()
                 self._session_push(session, "Stopped via /stop\n")
                 break
+
+            try:
+                stream_name, line = q.get(timeout=0.2)
+            except queue.Empty:
+                continue
 
             if line is None:
                 done_streams.add(stream_name)
@@ -802,22 +841,21 @@ class FlowOrchestrator:
         table.add_column("Last output", ratio=4)
 
         for session in self.sessions:
-            # Read directly from session.run — worker thread updates it after each turn
-            run = session.run
+            with session.lock:
+                run = session.run
+                status = session.status
+                last = session.last_line
+                pr_url = session.pr_url
+
             phase = run.phase.value if run else "?"
 
             steps_str = ""
             if run and run.plan_steps:
                 done = sum(1 for s in run.plan_steps if s.get("status") == "done")
                 total = len(run.plan_steps)
-                steps_str = f"{done}/{total}" if session.status == "running" else "✓"
+                steps_str = f"{done}/{total}" if status == "running" else "✓"
 
             cost_str = f"${run.cost_usd:.2f}" if run else "$0.00"
-
-            with session.lock:
-                status = session.status
-                last = session.last_line
-                pr_url = session.pr_url
 
             if status == "done":
                 status_str = "[green]done[/green]"
@@ -850,203 +888,6 @@ class FlowOrchestrator:
 
         return table
 
-    # ── Sticky status bar (drill-down) ────────────────────────────────────────
-
-    def _start_sticky_bar(self, session: AgentSession) -> tuple:
-        """Reserve the bottom terminal row and start a status bar writer thread.
-
-        Uses ANSI scroll-region to prevent normal output from overwriting the bar.
-        Returns (stop_event, thread) — caller must call _stop_sticky_bar to clean up.
-        """
-        rows = shutil.get_terminal_size().lines
-        # Constrain scroll region to rows 1..(rows-1); last row is reserved for the bar
-        sys.stdout.write(f"\033[1;{rows - 1}r")
-        sys.stdout.flush()
-
-        bar_stop = threading.Event()
-
-        def _writer():
-            while not bar_stop.is_set():
-                cols, rows = shutil.get_terminal_size()
-                with session.lock:
-                    phase = session.run.phase.value if session.run else "?"
-                    cost = f"${session.run.cost_usd:.4f}" if session.run else ""
-                    last = session.last_line or "…"
-                    status = session.status
-                icon = "●" if status == "running" else ("✓" if status == "done" else "✗")
-                bar = f" {icon} {session.idx}:{session.goal[:22]} │ {phase} │ {cost} │ {last}"
-                bar = bar[:cols]
-                bar = bar + " " * (cols - len(bar))
-                # Save cursor → jump to last row → erase → write bar in reverse video → restore
-                sys.stdout.write(f"\033[s\033[{rows};1H\033[2K\033[7m{bar}\033[m\033[u")
-                sys.stdout.flush()
-                time.sleep(0.4)
-
-        t = threading.Thread(target=_writer, daemon=True)
-        t.start()
-        return bar_stop, t
-
-    def _stop_sticky_bar(self, bar_stop: threading.Event, bar_thread: threading.Thread) -> None:
-        """Stop the status bar writer and restore the full scroll region."""
-        bar_stop.set()
-        bar_thread.join(timeout=1.5)
-        rows = shutil.get_terminal_size().lines
-        # Restore full-terminal scroll region and erase the bar row
-        sys.stdout.write(f"\033[r\033[s\033[{rows};1H\033[2K\033[u")
-        sys.stdout.flush()
-
-    # ── Drill-down ────────────────────────────────────────────────────────────
-
-    def _get_toolbar(self) -> HTML:
-        """Called by prompt_toolkit every refresh_interval — shows parallel session structure."""
-        self._drain_queues()
-
-        # Refresh cached API spend at most every 5s
-        now = time.monotonic()
-        if now - self._api_spend_last_refresh > 5.0:
-            try:
-                self._api_spend_cache = get_api_spend_today(self.project)
-            except Exception:
-                pass
-            self._api_spend_last_refresh = now
-
-        if not self.sessions:
-            return HTML(" no sessions")
-
-        PHASE_SHORT = {"plan": "plan", "execute": "exec", "verify": "vrfy", "ship": "ship"}
-        TYPE_SHORT = {"executor": "ex", "planner": "pl", "reviewer": "rv"}
-
-        parts = []
-        for s in self.sessions:
-            with s.lock:
-                st = s.status
-            type_tag = TYPE_SHORT.get(s.session_type, s.session_type[:2])
-            if st == "running":
-                phase = PHASE_SHORT.get(s.run.phase.value, s.run.phase.value) if s.run else "?"
-                parts.append(f"<b>[{s.idx}]</b> {type_tag}:{phase}")
-            elif st == "done":
-                parts.append(f"<b>[{s.idx}]</b> ✓")
-            else:
-                parts.append(f"<b>[{s.idx}]</b> ✗")
-
-        cost = f"  <ansicyan>${self._api_spend_cache:.4f}</ansicyan>" if self._api_spend_cache else ""
-        return HTML("  " + "   " .join(parts) + cost)
-
-    def _drill_down(self, idx: int) -> None:
-        if idx < 1 or idx > len(self.sessions):
-            console.print(f"[red]No session {idx}[/red]")
-            return
-
-        session = self.sessions[idx - 1]
-
-        console.print(f"\n[bold]─── Session {idx}: {session.goal} ───[/bold]")
-        for chunk in session.output_history:
-            console.print(chunk, end="", markup=False, highlight=False)
-
-        drain_stop = threading.Event()
-
-        def _drain_and_print():
-            while not drain_stop.is_set():
-                try:
-                    while True:
-                        chunk = session.output_queue.get_nowait()
-                        session.output_history.append(chunk)
-                        with session.lock:
-                            stripped = chunk.strip()
-                            if stripped:
-                                session.last_line = stripped[-100:]
-                        console.print(chunk, end="", markup=False, highlight=False)
-                except queue.Empty:
-                    time.sleep(0.1)
-
-        drain_thread = threading.Thread(target=_drain_and_print, daemon=True)
-        drain_thread.start()
-
-        bar_stop, bar_thread = self._start_sticky_bar(session)
-
-        goal_short = session.goal[:20]
-        type_tag = {"planner": "plan", "reviewer": "rev", "executor": "exec"}.get(
-            session.session_type, session.session_type
-        )
-        while True:
-            try:
-                cmd = self.prompt_session.prompt(
-                    f"[{idx}:{goal_short}:{type_tag}] > "
-                ).strip()
-            except (EOFError, KeyboardInterrupt):
-                break
-            if not cmd or cmd in ("/back", "b"):
-                break
-            if cmd.startswith("/prompt "):
-                msg = cmd[8:].strip()
-                if msg:
-                    session.inject_queue.put(msg)
-                    console.print(f"[dim]→ queued[/dim]")
-            elif cmd.startswith("/back"):
-                break
-            elif cmd.startswith("/"):
-                console.print("[dim]drill-down: /prompt <msg> to inject, /back to exit[/dim]")
-            else:
-                # Plain text also injects
-                session.inject_queue.put(cmd)
-                console.print(f"[dim]→ queued[/dim]")
-
-        drain_stop.set()
-        drain_thread.join(timeout=1)
-        self._stop_sticky_bar(bar_stop, bar_thread)
-        console.print(f"\n[dim]← Back to orchestrator[/dim]")
-
-    # ── Prompt ────────────────────────────────────────────────────────────────
-
-    def _prompt_str(self) -> str:
-        api_today = get_api_spend_today(self.project)
-        running = sum(1 for s in self.sessions if s.status == "running")
-        flags = " | no-agents" if self.no_agents else ""
-        if running:
-            return f"flow [${api_today:.2f} | {running} running{flags}] > "
-        return f"flow [${api_today:.2f}{flags}] > "
-
-    # ── Slash commands ────────────────────────────────────────────────────────
-
-    def handle_slash(self, cmd: str) -> None:
-        parts = cmd.strip().split(None, 1)
-        verb = parts[0].lower()
-        arg = parts[1].strip() if len(parts) > 1 else ""
-
-        if verb == "/status":
-            self._show_status()
-        elif verb == "/sessions":
-            self._show_sessions()
-        elif verb == "/prompt":
-            self._inject_prompt(arg)
-        elif verb == "/test-flow":
-            self._start_test_session()
-        elif verb == "/view":
-            if not arg.isdigit():
-                console.print("[red]Usage: /view N[/red]")
-            else:
-                self._drill_down(int(arg))
-        elif verb == "/model":
-            m = MODEL_ALIASES.get(arg.lower(), arg)
-            self.model_override = m
-            console.print(f"[dim]→ Model: {m}[/dim]")
-        elif verb == "/no-agents":
-            self.no_agents = not self.no_agents
-            os.environ["AP_NO_SPAWN"] = "1" if self.no_agents else "0"
-            console.print(f"[dim]→ Agent spawning: {'OFF' if self.no_agents else 'ON'}[/dim]")
-        elif verb == "/budget":
-            os.environ["AP_BUDGET_USD"] = arg or "2.00"
-            console.print(f"[dim]→ Budget cap: ${os.environ['AP_BUDGET_USD']}[/dim]")
-        elif verb == "/stop":
-            self._stop_session(int(arg) if arg.isdigit() else None)
-        elif verb == "/resume":
-            self._resume(arg)
-        elif verb in ("/quit", "/exit", "/q"):
-            self._on_quit()
-        elif verb == "/help":
-            self._show_help()
-        else:
-            console.print(f"[red]Unknown command: {verb}[/red]")
 
     def _stop_session(self, idx: Optional[int]) -> None:
         targets = (
@@ -1116,11 +957,30 @@ class FlowOrchestrator:
         self._attach_existing_run(r)
 
     def _attach_existing_run(self, run: RunState) -> None:
+        git_root = self._git_root()
+        cwd = git_root  # fallback if original worktree is gone
+
+        wt_result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        if wt_result.returncode == 0:
+            current_wt: Optional[Path] = None
+            for line in wt_result.stdout.splitlines():
+                if line.startswith("worktree "):
+                    current_wt = Path(line[9:].strip())
+                elif line.startswith("branch ") and current_wt:
+                    branch_ref = line[7:].strip()
+                    branch_name = branch_ref.split("/")[-1] if "/" in branch_ref else branch_ref
+                    if branch_name == run.branch and current_wt.exists():
+                        cwd = current_wt
+                        break
+
         idx = len(self.sessions) + 1
         session = AgentSession(
             idx=idx, goal=run.goal, run=run,
             project=run.project, branch=run.branch,
-            cwd=self._git_root(),
+            cwd=cwd,
         )
         session.thread = threading.Thread(
             target=self._session_worker, args=(session,), daemon=True,
@@ -1148,27 +1008,6 @@ class FlowOrchestrator:
             console.print("[dim]No sessions.[/dim]")
             return
         console.print(self._render_table())
-
-    def _show_help(self) -> None:
-        console.print(Panel(
-            "[bold]Session types (prefix your task):[/bold]\n"
-            "  <task>            executor — full pipeline: plan → execute → verify → ship\n"
-            "  plan: <question>  planner — interactive, stays alive, responds to /prompt (opus)\n"
-            "  review: <branch>  reviewer — one-shot AI code review of a branch (haiku)\n\n"
-            "[bold]Commands:[/bold]\n"
-            "  /test-flow        run a micro smoke test (plan→execute→verify, no ship)\n"
-            "  /prompt N <msg>   inject a message into session N\n"
-            "  /view N           drill into session N — full output + live tail\n"
-            "  /sessions         list all sessions with status\n"
-            "  /status           cost, quota, all sessions\n"
-            "  /model <name>     force model for new sessions (opus / sonnet / haiku)\n"
-            "  /no-agents        toggle subagent spawning\n"
-            "  /budget $X        set API spend cap\n"
-            "  /stop [N]         stop session N (or all running)\n"
-            "  /resume [id]      attach to an interrupted run\n"
-            "  /quit             exit (cleans up completed worktrees)",
-            title="AI Flow", border_style="dim",
-        ))
 
     def _start_test_session(self) -> AgentSession:
         """Start a fixed micro-task that exercises plan→execute→verify without shipping."""
@@ -1251,54 +1090,6 @@ class FlowOrchestrator:
             )
         console.print("[dim]Goodbye.[/dim]")
         sys.exit(0)
-
-    # ── Main loop ─────────────────────────────────────────────────────────────
-
-    def start(self) -> None:
-        init_db()
-
-        from flow.commands.doctor import hook_health_ok, hook_health_one_liner
-        if not hook_health_ok():
-            console.print(Panel(
-                hook_health_one_liner() + "\n\n"
-                "Hooks are not firing — enforcement and cost tracking are disabled.\n"
-                "Run [bold]flow doctor --fix[/bold] or [bold]flow init --force[/bold], then restart.",
-                title="[bold red]Hook configuration issue[/bold red]",
-                border_style="red",
-            ))
-
-        console.print(Panel(
-            f"[bold cyan]AI Flow[/bold cyan] — {self.project} ({self.branch})\n"
-            f"[dim]Type a task to start. Multiple tasks run in parallel. /help for commands.[/dim]",
-            border_style="cyan",
-        ))
-
-        with patch_stdout(raw=True):
-            while True:
-                try:
-                    user_input = self.prompt_session.prompt(
-                        self._prompt_str(),
-                        bottom_toolbar=self._get_toolbar,
-                        refresh_interval=0.5,
-                    ).strip()
-                except (EOFError, KeyboardInterrupt):
-                    console.print("\n[dim]Use /quit to exit.[/dim]")
-                    continue
-
-                if not user_input:
-                    continue
-
-                if user_input.startswith("/"):
-                    self.handle_slash(user_input)
-                    continue
-
-                if self._try_dispatch_flow_cmd(user_input):
-                    continue
-
-                session = self._start_session(user_input)
-                console.print(
-                    f"[dim]→ Session {session.idx} started on branch {session.branch}[/dim]"
-                )
 
     def _try_dispatch_flow_cmd(self, user_input: str) -> bool:
         stripped = user_input.strip()

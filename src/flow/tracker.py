@@ -414,13 +414,13 @@ def get_api_spend_today(project: Optional[str] = None) -> float:
             row = con.execute("""
                 SELECT COALESCE(SUM(cost_usd), 0) FROM sessions
                 WHERE billing_source = 'api' AND project = ?
-                AND created_at >= current_date::VARCHAR
+                AND substr(created_at, 1, 10) >= current_date::VARCHAR
             """, [project]).fetchone()
         else:
             row = con.execute("""
                 SELECT COALESCE(SUM(cost_usd), 0) FROM sessions
                 WHERE billing_source = 'api'
-                AND created_at >= current_date::VARCHAR
+                AND substr(created_at, 1, 10) >= current_date::VARCHAR
             """).fetchone()
     return row[0] if row else 0.0
 
@@ -438,14 +438,14 @@ def get_subscription_tokens_today(project: Optional[str] = None) -> dict:
                 SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0)
                 FROM sessions
                 WHERE billing_source = 'subscription' AND project = ?
-                AND created_at >= current_date::VARCHAR
+                AND substr(created_at, 1, 10) >= current_date::VARCHAR
             """, [project]).fetchone()
         else:
             row = con.execute("""
                 SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0)
                 FROM sessions
                 WHERE billing_source = 'subscription'
-                AND created_at >= current_date::VARCHAR
+                AND substr(created_at, 1, 10) >= current_date::VARCHAR
             """).fetchone()
     return {"tokens_in": row[0] if row else 0, "tokens_out": row[1] if row else 0}
 

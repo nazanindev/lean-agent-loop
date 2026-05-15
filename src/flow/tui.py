@@ -84,7 +84,8 @@ class SessionPane(Vertical):
             with self.session.lock:
                 st = self.session.status
                 waiting = self.session.waiting_for_input
-            phase = self.session.run.phase.value if self.session.run and st == "running" else st
+                run = self.session.run
+            phase = run.phase.value if run and st == "running" else st
             if waiting:
                 icon = "?"
             elif st == "running":
@@ -174,6 +175,8 @@ class DrillDownScreen(Screen):
                             line, buf = buf.split("\n", 1)
                             self.call_from_thread(log_widget.write, line)
                 except Exception:
+                    if self._drain_stop.is_set():
+                        break
                     time.sleep(0.05)
         t = threading.Thread(target=_drain, daemon=True)
         t.start()
@@ -190,6 +193,15 @@ class DrillDownScreen(Screen):
         event.input.clear()
         if not text or text in ("/back", "b"):
             self.app.pop_screen()
+            return
+        if text.startswith("/stop"):
+            self.orchestrator._stop_session(self.session.idx)
+            log = self.query_one("#drill-log", RichLog)
+            log.write("→ stop signal sent\n")
+            return
+        if text.startswith("/") and not text.startswith("/prompt "):
+            log = self.query_one("#drill-log", RichLog)
+            log.write("drill-down: /prompt <msg> to inject · /stop · /back to exit\n")
             return
         msg = text[8:].strip() if text.startswith("/prompt ") else text
         if msg:

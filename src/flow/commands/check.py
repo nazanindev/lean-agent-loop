@@ -11,10 +11,9 @@ from rich.console import Console
 
 from flow.billing import metered_call
 from flow.config import load_style, style_prompt
+from flow.router import utility_model
 
 console = Console()
-
-CHECK_MODEL = "claude-haiku-4-5-20251001"
 
 CHECK_SYSTEM = """You are an independent evaluator for code changes.
 Review the provided git diff and return ONLY valid JSON with this exact schema:
@@ -117,7 +116,7 @@ def _normalize_report(raw: Any) -> dict[str, Any]:
     }
 
 
-def run_check(diff_text: str | None = None) -> dict[str, Any]:
+def run_check(diff_text: str | None = None, run_id: str = "check-local") -> dict[str, Any]:
     """Evaluate local diff and return normalized structured report."""
     style = load_style()
     check_style = style_prompt(style, ["ci_review"])
@@ -131,8 +130,8 @@ def run_check(diff_text: str | None = None) -> dict[str, Any]:
 
     resp = metered_call(
         _client(),
-        CHECK_MODEL,
-        run_id="check-local",
+        utility_model("fast"),
+        run_id=run_id,
         purpose="check",
         max_tokens=1400,
         system=system,

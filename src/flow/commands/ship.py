@@ -9,13 +9,12 @@ from rich.panel import Panel
 
 from flow.billing import metered_call
 from flow.config import get_project_id, load_style, style_prompt
+from flow.router import utility_model
 from flow.tracker import init_db, load_active_run, Phase, RunStatus
 from flow.run_manager import advance_phase, complete_run, save_pr_url
 from flow.commands.verify import run_checks
 
 console = Console()
-
-HAIKU = "claude-haiku-4-5-20251001"
 
 
 def _git(args: list, check: bool = True) -> subprocess.CompletedProcess:
@@ -60,7 +59,7 @@ def _generate_commit_message(diff: str, style: dict, run_id: str) -> str:
     system += "\nOutput ONLY the commit message — no explanation, no code fences."
 
     resp = metered_call(
-        _client(), HAIKU,
+        _client(), utility_model("fast"),
         run_id=run_id, purpose="commit_msg",
         max_tokens=120,
         system=system,
@@ -98,13 +97,13 @@ Diff (first 6000 chars):
     run_id = run.run_id if run else "none"
 
     title_resp = metered_call(
-        client, HAIKU,
+        client, utility_model("fast"),
         run_id=run_id, purpose="pr_title",
         max_tokens=80, system=system_title,
         messages=[{"role": "user", "content": context}],
     )
     body_resp = metered_call(
-        client, HAIKU,
+        client, utility_model("smart"),
         run_id=run_id, purpose="pr_body",
         max_tokens=600, system=system_body,
         messages=[{"role": "user", "content": context}],
@@ -149,6 +148,13 @@ def cmd_ship(branch_name: str = "", pr_title_override: str = "") -> None:
     console.print(f"[bold]Commit:[/bold] {commit_msg}")
 
     # ── 4. Stage and commit ───────────────────────────────────────────────────
+    _RISK_PATTERNS = (".env", "credentials", ".pem", ".key", "id_rsa", "service_account", "secret")
+    untracked = _git(["ls-files", "--others", "--exclude-standard"], check=False)
+    for uf in untracked.stdout.strip().splitlines():
+        if any(pat in uf.lower() for pat in _RISK_PATTERNS):
+            console.print(f"[red]✗ Ship aborted — potential secret file: {uf}[/red]")
+            console.print("[dim]Remove or add to .gitignore, then re-run flow ship.[/dim]")
+            raise SystemExit(1)
     _git(["add", "-A"])
     commit_result = _git(["commit", "-m", commit_msg], check=False)
     if commit_result.returncode != 0:

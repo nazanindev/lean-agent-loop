@@ -10,11 +10,9 @@ from rich.console import Console
 
 from flow.billing import metered_call
 from flow.config import load_style, style_prompt
+from flow.router import utility_model
 
 console = Console()
-
-HAIKU = "claude-haiku-4-5-20251001"
-SONNET = "claude-sonnet-4-6"
 
 PASS1_SYSTEM = """You are a fast code reviewer. Scan the diff and output a JSON array of issues.
 Each issue: {"file": "path", "line": <int or null>, "severity": "blocker|suggestion|nit", "comment": "..."}
@@ -93,7 +91,7 @@ def cmd_ci_review(diff_path: Optional[str] = None, pr_number: Optional[int] = No
     console.print("[dim]Pass 1: quick scan (Haiku)...[/dim]")
 
     resp1 = metered_call(
-        client, HAIKU,
+        client, utility_model("fast"),
         run_id=run_id, purpose="ci_review_pass1",
         max_tokens=1000,
         system=system1,
@@ -124,7 +122,7 @@ def cmd_ci_review(diff_path: Optional[str] = None, pr_number: Optional[int] = No
 
         issues_summary = json.dumps(issues, indent=2)
         resp2 = metered_call(
-            client, SONNET,
+            client, utility_model("smart"),
             run_id=run_id, purpose="ci_review_pass2",
             max_tokens=800,
             system=system2,

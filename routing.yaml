@@ -4,6 +4,17 @@ phases:
   fast: claude-haiku-4-5-20251001
   ci: claude-haiku-4-5-20251001
 
+# Models for flow-internal utility calls (commit msgs, PR bodies, ci-review, check).
+# Requires GOOGLE_API_KEY for any gemini/ model.
+utility:
+  fast: claude-haiku-4-5-20251001    # cheap pass — commit msgs, pass-1 review
+  smart: claude-sonnet-4-6           # smarter pass — PR bodies, pass-2 review
+
+# Gemini options (swap above to use):
+#   fast:  gemini/gemini-2.5-flash       ($0.15/M in, $0.60/M out)
+#   fast:  gemini/gemini-2.5-flash-lite  ($0.075/M in, $0.30/M out)
+#   smart: gemini/gemini-2.5-pro         ($1.25/M in, $10/M out)
+
 # Task keyword overrides (checked before phase routing)
 task_overrides:
   architecture: claude-opus-4-7

@@ -59,7 +59,7 @@ def account_claude_code_session_end(
             run.subscription_tokens_out += tokens_out
             save_run(run)
     else:
-        cost = calc_cost(model, tokens_in, tokens_out)
+        cost = calc_cost(model, tokens_in, tokens_out, cache_read_input_tokens)
         if run:
             run.cost_usd += cost
             save_run(run)
