@@ -1,10 +1,10 @@
 # `flow`
 
-Run multiple Claude Code agents in parallel from a single terminal.
+Personal AI dev harness built on Claude Code. Parallel agents, terminal control room, automatic pipeline from task to PR.
 
 ![flow control room](docs/screenshot.png)
 
-Each session gets its own git worktree and branch. The control room shows all of them live — type a new task at any time and it starts immediately alongside whatever is already running.
+Three sessions running simultaneously: a planner working through an architecture question, an executor that just shipped rate limiting, and a reviewer that auto-spawned after the ship.
 
 ---
 
